@@ -1,0 +1,1009 @@
+// TermiMates: 대화창 옆 사무실 패널.
+// 토큰 0 · 방해 0: 모든 훅은 관찰만 하고 next(e) 결과를 그대로 돌려준다. 모델 호출, 프롬프트 · 컨텍스트 변경,
+// 모델이 쓰는 도구 등록 없음. 명령 /termimates 는 글을 남기지 않는다(모델이 읽을 줄이 없다).
+
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, TurnUsage } from 'claude-code'
+
+import type { Fill, Office, Power, View } from '../types'
+import { HOLD, IDLE_DEMO, QA_STEPS, startDemo, STEPS } from './demo'
+import {
+  addUsage, EMPTY, jobOfW, log, onComplete, onPrompt, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart, onTurnStart, readerOf,
+  running, set, toShelf, unitOf,
+} from './office'
+import {
+  adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
+} from './power'
+import { CW, draw, encode, isGone, isMoving, layout, seatsOf, TAG_ROW } from './scene'
+import { setLocalNotes, skillNote, skillRole } from './skills'
+import { ago, bubbles, clip, hhmm, targetOf, title } from './words'
+
+const PANE = 'office'
+const TITLE = '사무실'
+
+const office = atom({ plugin: 'termimates', key: 'office' } as const, EMPTY, { shape: 'office-1' })
+const view = atom({ plugin: 'termimates', key: 'view' } as const, { tab: 'office', selected: 'main' } as View, {
+  shape: 'view-1',
+})
+const power = atom({ plugin: 'termimates', key: 'power' } as const, EMPTY_POWER, { shape: 'power-1' })
+const demo = atom({ plugin: 'termimates', key: 'demo' } as const, IDLE_DEMO, { shape: 'demo-1' })
+
+// -- 화면 도우미 ----------------------------------------------------------------
+
+function dw(s: string): number {
+  let n = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0
+    n += c >= 0x1100 && (c <= 0x115f || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) ||
+      (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6) || c >= 0x1f300) ? 2 : 1
+  }
+  return n
+}
+
+function fit(s: string, cols: number): string {
+  if (dw(s) <= cols) return s
+  let out = ''
+  for (const ch of s) {
+    if (dw(out + ch) > cols - 1) break
+    out += ch
+  }
+  return out + '…'
+}
+
+let lastWidth = 0 // 애니메이션 타이머가 쓰는 패널 폭 (다시 그릴 때마다 갱신)
+
+/** 한 줄을 조각(글자 + 모양)으로 받아 폭 안에서 자른다. 넘치는 조각은 '…' 로 끝내고 뒤는 버린다. */
+type Piece = [string, Record<string, unknown>?]
+function rowOf(T: ReturnType<EngineInterface['ui']['resolve']>, key: string, cols: number, pieces: Piece[]): JSX.Element {
+  const { Box, Text } = T
+  const out: JSX.Element[] = []
+  let used = 0
+  for (const [i, [text, props]] of pieces.entries()) {
+    if (!text) continue
+    const w = dw(text)
+    if (used + w > cols) {
+      if (cols - used >= 2) out.push(<Text key={key + i} {...(props ?? {})}>{fit(text, cols - used)}</Text>)
+      break
+    }
+    out.push(<Text key={key + i} {...(props ?? {})}>{text}</Text>)
+    used += w
+  }
+  return <Box key={key}>{out}</Box>
+}
+
+// -- 전기세 · 피로도 ----------------------------------------------------------------
+// 엔진이 이미 센 숫자만 쓴다: turn.complete 의 usage, session.measure 의 context, 직원의 tokenCount → 토큰 0.
+// 오늘 합계는 $.store 에 세션마다 자기 키(day:<날짜>:<세션>)로 적어 여러 창이 서로 덮어쓰지 않게 한다.
+
+let sid = '' // 이 세션 id (store 키)
+let pastTotals: Record<string, number> = {} // 지난 날짜별 합계 (하루에 한 번 읽음)
+let pastDay = ''
+
+/** 지난 날 기록을 읽는다. 지난 날은 키 하나로 합치고, 14일 넘은 건 지운다. */
+async function loadPast($: EngineInterface, day: string) {
+  const byDay: Record<string, string[]> = {}
+  for (const k of await $.store.keys()) {
+    if (!k.startsWith('day:')) continue
+    const d = k.slice(4, 14)
+    ;(byDay[d] = byDay[d] ?? []).push(k)
+  }
+  const totals: Record<string, number> = {}
+  for (const [d, ks] of Object.entries(byDay)) {
+    if (d >= day) continue
+    if (isOld(d, day)) {
+      for (const k of ks) await $.store.delete(k)
+      continue
+    }
+    let n = 0
+    for (const k of ks) n += Number(await $.store.get(k)) || 0
+    totals[d] = n
+    const one = `day:${d}:sum`
+    if (ks.length > 1 || ks[0] !== one) {
+      await $.store.set(one, n)
+      for (const k of ks) if (k !== one) await $.store.delete(k)
+    }
+  }
+  pastTotals = totals
+  pastDay = day
+}
+
+async function todayTotal($: EngineInterface, day: string): Promise<number> {
+  let n = 0
+  for (const k of await $.store.keys()) if (k.startsWith(`day:${day}:`)) n += Number(await $.store.get(k)) || 0
+  return n
+}
+
+async function leadFill($: EngineInterface): Promise<Fill | undefined> {
+  try {
+    const { context } = await $.session.usage()
+    return context.tokens ? { tokens: context.tokens, window: context.window } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function workerFill($: EngineInterface, id: string): Promise<Fill | undefined> {
+  try {
+    const a = (await $.agent.list()).find(x => x.id === id)
+    return a && a.tokenCount > 0 ? { tokens: a.tokenCount, window: a.contextWindowSize ?? 200000 } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function changePower($: EngineInterface, fn: (p: Power) => Power) {
+  try {
+    await update($, power, p => fn(p ?? EMPTY_POWER))
+  } catch {
+    // 기록 실패는 조용히 넘긴다
+  }
+}
+
+/** 한 차례(팀장 또는 직원)가 쓴 토큰을 이번 일 · 세션 · 직원 몫 · 오늘 합계에 더한다. */
+async function count($: EngineInterface, agentId: string | undefined, usage: TurnUsage | undefined) {
+  if (!usage) return
+  const t = tokOf(usage)
+  const n = sum(t)
+  if (!n) return
+  const id = agentId ?? 'main'
+  const fill = agentId ? await workerFill($, agentId) : await leadFill($)
+  try {
+    const day = dayOf(await $.clock.now())
+    await changePower($, p => addUsage(p, id, t, day, fill))
+    if (!sid) return
+    if (day !== pastDay) await loadPast($, day)
+    await $.store.set(dayKey(day, sid), (await read($, power)).mine)
+    const today = await todayTotal($, day)
+    const { usual } = baseline({ ...pastTotals, [day]: today }, day)
+    await changePower($, p => ({ ...p, today: Math.max(today, p.day === day ? p.mine : 0), usual }))
+  } catch {
+    // 기록 실패는 조용히 넘긴다
+  }
+}
+
+/** 새 지시가 오면 지난 일의 합계를 '최근 일들'에 남기고 이번 일을 0 으로. */
+async function closeJob($: EngineInterface) {
+  const n = sum((await read($, power)).job)
+  if (!n) return
+  let jobUsual: number | undefined
+  try {
+    const old = await $.store.get('jobs')
+    const list = [...(Array.isArray(old) ? old.filter((x): x is number => typeof x === 'number' && x > 0) : []), n].slice(-30)
+    await $.store.set('jobs', list)
+    jobUsual = average(list)
+  } catch {
+    // 기록 실패는 조용히 넘긴다
+  }
+  await changePower($, p => ({ ...p, job: ZERO, jobUsual: jobUsual ?? p.jobUsual }))
+}
+
+/** 세션 시작(또는 다시 불러옴): 오늘 합계 · 평소 · 팀장 피로도를 읽어 둔다. 쌓인 숫자는 지우지 않는다. */
+async function startPower($: EngineInterface) {
+  try {
+    sid = await $.session.id()
+  } catch {
+    sid = ''
+  }
+  const fill = await leadFill($)
+  try {
+    const day = dayOf(await $.clock.now())
+    await loadPast($, day)
+    const stored = sid ? Number(await $.store.get(dayKey(day, sid))) || 0 : 0
+    const today = await todayTotal($, day)
+    const jobs = await $.store.get('jobs')
+    const jobUsual = average(Array.isArray(jobs) ? jobs.filter((x): x is number => typeof x === 'number' && x > 0) : [])
+    const { usual } = baseline({ ...pastTotals, [day]: today }, day)
+    await changePower($, p => ({
+      ...p, day, mine: Math.max(p.day === day ? p.mine : 0, stored), today, usual, jobUsual, lead: fill ?? p.lead,
+    }))
+  } catch {
+    if (fill) await changePower($, p => ({ ...p, lead: fill }))
+  }
+}
+
+// 이 명령들은 일을 시키는 게 아니라서 '이번 일' 을 새로 시작하지 않는다
+const QUIET = new Set(['termimates', 'help', 'cost', 'context', 'status', 'config', 'plugin', 'plugins', 'reload-plugins',
+  'model', 'theme', 'skills', 'usage', 'doctor', 'memory', 'permissions', 'agents', 'mcp', 'hooks', 'fast'])
+
+// -- 창 열림 기억: 저절로 열지 않는다 (다른 프로젝트 세션을 방해하지 않게) ----------------------------
+// 저절로 열지 않는다. 프로젝트마다 마지막으로 /termimates 로 켰는지 끄는지를 기억해 두고, 켜 둔 프로젝트만 다시 연다.
+let project = '' // 이 세션의 프로젝트 폴더 (기억 키)
+
+async function remember($: EngineInterface, isOpen: boolean) {
+  if (project) await $.store.set(`open:${project}`, isOpen).catch(() => undefined)
+}
+
+// -- 책장 = 스킬 목록: 책장을 누르면 주르륵 ----------------------------------------------------------
+// 내 스킬(내가 만든 것)과 플러그인 스킬(플러그인별로 묶음)을 확실히 나누고, 줄마다 이름 + 한 줄 설명만 (담당은 화면에 안 보임)
+export type ShelfItem = { name: string; note: string; role: string; source: string; plugin: string; count: number; last: number }
+let cmdCache: { at: number; list: { name: string; description: string; source: string; plugin: string }[] } | undefined
+
+/** 내 스킬 · 명령 (개인 + 플러그인). 방금 쓴 것 먼저, 그다음 개인, 플러그인 */
+async function shelfItems($: EngineInterface, o: Office): Promise<ShelfItem[]> {
+  const now = Date.now()
+  if (!cmdCache || now - cmdCache.at > 30000) {
+    const all = await $.command.list().catch(() => [])
+    cmdCache = { at: now, list: all
+      .filter(c => (c.source === 'user' || c.source === 'plugin') && c.name !== 'termimates' && c.plugin !== 'termimates')
+      .map(c => ({ name: c.name, description: c.description, source: c.source,
+        plugin: c.source === 'user' ? '' : c.plugin ?? (c.name.includes(':') ? c.name.split(':')[0]! : '기타') })) }
+  }
+  return cmdCache.list.map(c => {
+    const u = o.skillUses[c.name]
+    return { name: c.name, note: skillNote(c.name, c.description), role: skillRole(c.name, c.description), source: c.source,
+      plugin: c.plugin, count: u?.count ?? 0, last: u?.last ?? 0 }
+  }).sort((a, b) => b.last - a.last || (a.source === b.source ? a.name.localeCompare(b.name) : a.source === 'user' ? -1 : 1))
+}
+
+// -- 웹 사무실: 같은 사무실을 브라우저에서 크게 (창 크기에 맞춰 반응형) ---------------------------------
+// 패널이 지금 사무실 상태를 이 컴퓨터 파일(~/.termimates/panel/<세션>.json)에 적고, 같이 든 작은 서버(web/serve.py,
+// 127.0.0.1 만)가 브라우저로 보낸다. 그림은 브라우저가 그린다(web/office.js). 모델 호출 없음, 토큰 0.
+const WEB_PORT = 8766
+let webOn = false
+let snapDir = ''
+let lastSnap = ''
+let lastSnapAt = 0
+let server: { return?: () => unknown } | undefined
+let serverTriedAt = 0
+
+let home = ''
+async function homeOf($: EngineInterface): Promise<string> {
+  if (!home) home = (await $.process.run(['/usr/bin/printenv', 'HOME'])).stdout.trim()
+  return home
+}
+
+async function homeDir($: EngineInterface): Promise<string> {
+  if (snapDir) return snapDir
+  snapDir = `${await homeOf($)}/.termimates/panel`
+  return snapDir
+}
+
+/** 이 컴퓨터의 스킬 한 줄 설명 (~/.termimates/skill-notes.json). git 에 안 올리는 내 설정 — 없으면 스킬 설명 첫 문장 */
+async function loadLocalNotes($: EngineInterface) {
+  try {
+    const text = await $.fs.read(`${await homeOf($)}/.termimates/skill-notes.json`)
+    setLocalNotes(JSON.parse(String(text)))
+    cmdCache = undefined
+  } catch {
+    // 없으면 그만
+  }
+}
+
+/** 직원 피로도를 2초마다 새로 잰다 (직원마다 따로: 그 에이전트 대화가 얼마나 찼는지). 이미 있는 숫자만 읽어 토큰 0 */
+async function sampleFills($: EngineInterface) {
+  try {
+    const o = await read($, office)
+    const live = o.workers.filter(w => w.ended === undefined)
+    if (!live.length) return
+    const agents = await $.agent.list()
+    const got: Record<string, Fill> = {}
+    for (const w of live) {
+      const a = agents.find(x => x.id === w.id)
+      if (a && a.tokenCount > 0) got[w.id] = { tokens: a.tokenCount, window: a.contextWindowSize ?? 200000 }
+    }
+    if (!Object.keys(got).length) return
+    await changePower($, p => (Object.entries(got).every(([k, f]) => p.workers[k]?.tokens === f.tokens) ? p : { ...p, workers: { ...p.workers, ...got } }))
+  } catch {
+    // 못 재도 그대로
+  }
+}
+
+/** 자리별 피로도 % (그림의 책상 앞 막대 · 계기판용) */
+function fillsOf(o: Office, pw: Power): Record<string, number> {
+  const out: Record<string, number> = {}
+  const lp = percentOf(pw.lead)
+  if (lp !== undefined) out.main = lp
+  for (const u of seatsOf(o, unitOf)) {
+    const p = percentOf(pw.workers[u.worker.id])
+    if (p !== undefined && u.worker.ended === undefined) out[u.role] = p
+  }
+  return out
+}
+
+/** 서버를 띄운다. 이미 다른 세션 서버가 그 포트에 있으면 새 서버는 바로 끝나고, 그걸 같이 쓴다(가끔 다시 시도). */
+function runServer($: EngineInterface, dir: string) {
+  if (server) return
+  serverTriedAt = Date.now()
+  let child: ReturnType<EngineInterface['process']['spawn']>
+  try {
+    child = $.process.spawn({ argv: ['python3', `${$.plugin.root}/web/serve.py`, '--port', String(WEB_PORT), '--dir', dir] })
+  } catch {
+    return // python3 를 못 띄움 — 패널은 그대로
+  }
+  server = child as unknown as { return?: () => unknown }
+  void (async () => {
+    try {
+      for await (const _ of child) {
+        if (!webOn) break // 끄면 고리를 나와 서버도 끝
+      }
+    } catch {
+      // python3 가 없거나 못 띄움 — 패널은 그대로
+    } finally {
+      server = undefined
+    }
+  })()
+}
+
+function stopServer() {
+  try {
+    server?.return?.()
+  } catch {
+    // 이미 끝남
+  }
+  server = undefined
+}
+
+/** 지금 상태를 파일로 (바뀐 게 있을 때만, 0.3초마다 확인) */
+async function writeSnap($: EngineInterface) {
+  if (!webOn || !snapDir) return
+  try {
+    if (!server && Date.now() - serverTriedAt > 15000) runServer($, snapDir)
+    const dm = await read($, demo)
+    const o = dm.running ? dm.office : await read($, office)
+    const pw = dm.running ? dm.power : await read($, power)
+    const units = seatsOf(o, unitOf).map(u => ({
+      key: u.role, job: jobOfW(u.worker), worker: u.worker.id, count: u.count, team: u.list.some(w => w.team),
+      members: u.list.map(w => ({ id: w.id, member: w.member, status: w.status })),
+    }))
+    const skills = await shelfItems($, o)
+    const body = JSON.stringify({
+      v: 1, session: sid, project, demo: dm.running ? { step: dm.step, total: dm.total } : null, office: o, power: pw, units, skills,
+    })
+    const now = Date.now()
+    if (body === lastSnap && now - lastSnapAt < 5000) return
+    lastSnap = body
+    lastSnapAt = now
+    await $.fs.write(`${snapDir}/${sid || 'session'}.json`, body)
+  } catch {
+    // 못 적어도 패널은 그대로
+  }
+}
+
+async function startWeb($: EngineInterface) {
+  webOn = true
+  lastSnap = ''
+  const dir = await homeDir($)
+  runServer($, dir)
+  await writeSnap($)
+}
+
+// -- 시연 (가짜 장면, 토큰 0) -----------------------------------------------------
+const DEMO_WORDS = new Set(['시연', '예시', 'demo'])
+let demoRun = 0 // 몇 번째 시연인지: 멈추거나 다시 시작하면 앞 시연은 그 자리에서 그친다
+
+async function runDemo($: EngineInterface, steps = STEPS) {
+  const my = ++demoRun
+  try {
+    const t0 = await $.clock.now()
+    await update($, demo, () => startDemo(t0, steps.length))
+    for (const [i, s] of steps.entries()) {
+      await $.clock.sleep(s.wait)
+      if (my !== demoRun) return
+      const now = await $.clock.now()
+      await update($, demo, d => (d?.running ? { ...s.run(d, now), step: i + 1 } : (d ?? IDLE_DEMO)))
+    }
+    await $.clock.sleep(HOLD)
+    if (my === demoRun) await update($, demo, d => ({ ...(d ?? IDLE_DEMO), running: false }))
+  } catch {
+    // 시연이 멈춰도 실제 사무실은 그대로
+  }
+}
+
+async function stopDemo($: EngineInterface) {
+  demoRun++
+  await update($, demo, d => ({ ...(d ?? IDLE_DEMO), running: false })).catch(() => undefined)
+}
+
+/** 사무실 상태 바꾸기. 실패해도 Claude 작업은 그대로 간다. */
+async function change($: EngineInterface, fn: (o: Office, now: number) => Office) {
+  try {
+    const now = await $.clock.now()
+    await update($, office, o => fn(o ?? EMPTY, now))
+  } catch {
+    // 기록 실패는 조용히 넘긴다
+  }
+}
+
+/** 애니메이션: 그림만 바꿔 칠한다 (다시 그리기 없음). 패널이 없으면 그냥 넘어간다. */
+let lastBlit = 0
+
+async function animate($: EngineInterface) {
+  if (!lastWidth) return
+  try {
+    const d = await read($, demo)
+    const o = d.running ? d.office : await read($, office)
+    const pw = d.running ? d.power : await read($, power)
+    const now = await $.clock.now()
+    if (!isMoving(o, now) && now - lastBlit < 340) return
+    lastBlit = now
+    const L = layout(o, lastWidth, unitOf, jobOfW)
+    await $.ui.blit({ requestId: PANE, key: 'scene', cells: encode(draw(o, L, now, new Date(now).getHours(), fillsOf(o, pw)), L.cols, L.rows) })
+  } catch {
+    // 닫혀 있거나 크기가 바뀌는 중
+  }
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    const ran = await next(e)
+    try {
+      // immediate: Claude 가 일하는 중에 쳐도 기다리지 않고 바로 켜고 끈다 (글을 남기지 않아 대화에 섞이지 않음)
+      await $.command.register({
+        name: 'termimates', description: '사무실 창 열기 / 닫기 · 「도움말」 사용법 · 「웹」 브라우저 사무실 · 「시연」 가짜 장면 (토큰 0)',
+        argumentHint: '[도움말 | 웹 | 시연 | 시연 qa]', immediate: true,
+      })
+      await change($, onStart)
+      // 움직이는 게 있으면 1초에 10번, 없으면 1초에 3번만 그린다 (걷기가 뚝뚝 끊기지 않게)
+      $.clock.every(100, () => {
+        void animate($)
+      })
+      await startPower($)
+      void loadLocalNotes($)
+      project = e.cwd
+      // 처음 깐 사람: 딱 한 번 저절로 열고 사용법 안내 카드를 보여 준다
+      const welcomed = await $.store.get('welcomed').catch(() => true)
+      if (welcomed !== true) {
+        await $.store.set('welcomed', true).catch(() => undefined)
+        await update($, view, x => ({ ...(x ?? ({ tab: 'office', selected: 'main' } as View)), guide: true }))
+        void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
+      } else if ((await $.store.get(`open:${project}`).catch(() => undefined)) === true) void $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
+      if ((await $.store.get(`web:${project}`).catch(() => undefined)) === true) await startWeb($).catch(() => undefined)
+      $.clock.every(300, () => {
+        void writeSnap($)
+      })
+      $.clock.every(2000, () => {
+        void sampleFills($)
+      })
+    } catch {
+      // 패널을 못 열어도 세션은 그대로
+    }
+    return ran
+  })
+
+  // /termimates 는 켜고 끄는 스위치: 보이면 닫고, 아니면 연다
+  // /termimates 시연 = 가짜 장면 켜고 끄기 (Claude 를 부르지 않음)
+  on('command.run', { command: 'termimates' }, async ($, e) => {
+    const up = (await $.ui.panes()).find(p => p.id === PANE)
+    // /termimates 시연 = 회원가입 장면, /termimates 시연 qa = QA 3팀 × 3명 장면. 시연 중에 다시 치면 멈춤
+    const words = e.args.trim().toLowerCase().split(/\s+/)
+    // /termimates 도움말 = 처음 쓰는 사람 안내 카드
+    if (words.some(x => ['도움말', 'help', '가이드', '안내'].includes(x))) {
+      await update($, view, x => ({ ...(x ?? ({ tab: 'office', selected: 'main' } as View)), tab: 'office' as const, guide: true, shelf: false }))
+      if (!(up?.isPlaced && up.isShown)) await $.ui.open({ id: PANE, title: TITLE })
+      return {}
+    }
+    // /termimates 웹 = 브라우저 사무실 켜고 끄기 (프로젝트마다 기억). 브라우저는 사람이 직접 연다
+    if (words.includes('웹') || words.includes('web')) {
+      if (webOn) {
+        webOn = false
+        stopServer()
+        await $.store.set(`web:${project}`, false).catch(() => undefined)
+        $.ui.toast('웹 사무실을 껐어요')
+      } else {
+        await startWeb($).catch(() => undefined)
+        await $.store.set(`web:${project}`, true).catch(() => undefined)
+        $.ui.toast(`웹 사무실: http://127.0.0.1:${WEB_PORT} — 브라우저에서 열어 보세요`)
+      }
+      return {}
+    }
+    if (words.some(x => DEMO_WORDS.has(x))) {
+      if ((await read($, demo)).running) await stopDemo($)
+      else {
+        if (!(up?.isPlaced && up.isShown)) await $.ui.open({ id: PANE, title: TITLE })
+        void runDemo($, words.includes('qa') ? QA_STEPS : STEPS)
+      }
+      return {}
+    }
+    if (up?.isPlaced && up.isShown) {
+      await $.ui.close({ id: PANE })
+      await remember($, false)
+    } else {
+      await $.ui.open({ id: PANE, title: TITLE })
+      await remember($, true)
+    }
+    return {}
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    const ran = await next(e)
+    if (!e.isMeta && (!e.command || !QUIET.has(e.command.name))) await closeJob($)
+    // 사장님이 /스킬 로 직접 부르면 팀장이 책장에 다녀온다 (Claude 가 Skill 도구로 쓰면 쓴 사람이 간다: office.ts)
+    const cmd = e.command?.name
+    if (!e.isMeta && cmd && !QUIET.has(cmd)) {
+      const known = (await $.command.list().catch(() => [])).find(c => c.name === cmd && (c.source === 'user' || c.source === 'plugin'))
+      if (known) await change($, (o, now) => toShelf(o, readerOf(o, 'main', cmd, known.description), cmd, now))
+    }
+    if (!e.isMeta && !e.command) {
+      await change($, (o, now) => onPrompt(o, e.text, now))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    const ran = await next(e)
+    await change($, (o, now) => onTurnStart(o, e.agentId ?? 'main', now))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', async ($, e, next) => {
+    const raw = e as unknown as Record<string, unknown>
+    const tool = String(e.tool)
+    const target = targetOf(raw)
+    const sub = typeof raw.subagent_type === 'string' ? raw.subagent_type : undefined
+    const who = e.agentId ?? 'main'
+    await change($, (o, now) => onToolStart(who === 'main' ? onTodos(o, tool, raw) : o, who, tool, target, sub, now))
+    const ran = await next(e)
+    const failed = ran.deny === undefined && ran.isError === true
+    const errText = failed ? String((ran as { text?: string }).text ?? '실패') : undefined
+    await change($, (o, now) => onToolEnd(o, who, tool, target, sub, failed, errText, now))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('agent.spawn', async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || !ran.agentId) return ran
+    const id = ran.agentId
+    await change($, (o, now) => onSpawn(o, {
+      id, type: e.subagentType, name: e.name, description: e.description, background: e.background,
+      teammate: e.isTeammate === true, parentAgentId: e.parentAgentId, prompt: e.prompt,
+    }, now))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const ran = await next(e)
+    const id = e.agentId
+    await count($, id, e.usage)
+    await change($, (o, now) => onComplete(o, id, e.answer, e.isAborted, now))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('skill.prompt', async ($, e, next) => {
+    const ran = await next(e)
+    await change($, (o, now) => {
+      const u = o.skillUses[e.skill] ?? { count: 0, last: 0 }
+      return { ...o, skillUses: { ...o.skillUses, [e.skill]: { count: u.count + 1, last: now } } }
+    })
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 팀장 피로도: 엔진이 차례마다 잰 대화량
+  on('session.measure', async ($, e, next) => {
+    const ran = await next(e)
+    const tokens = e.context.tokens
+    if (tokens) await changePower($, p => ({ ...p, lead: { tokens, window: e.context.window } }))
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 대화 정리(compact) = 커피 마시며 서류 정리 → 피로 회복
+  on('session.compact', async ($, e, next) => {
+    const mine = !e.agentId && e.trigger !== 'precompute'
+    if (mine) {
+      await change($, (o, now) => ({
+        ...o, lead: log(set(o.lead, 'think', '커피 마시며 서류 정리하는 중 (대화 정리)', now), now, '대화 정리 시작'),
+      }))
+    }
+    const ran = await next(e)
+    if (mine) {
+      const skipped = 'skip' in ran && ran.skip !== undefined
+      await change($, (o, now) => ({
+        ...o,
+        lead: log(set(o.lead, e.trigger === 'manual' ? 'idle' : 'think',
+          skipped ? '정리 못 하고 하던 일로' : e.trigger === 'manual' ? '정리 끝, 피로가 풀렸어요' : '정리 끝, 하던 일로 돌아가는 중', now),
+        now, skipped ? '대화 정리 안 됨' : '대화 정리 끝 — 피로 회복'),
+      }))
+      if (!skipped) {
+        // 엔진이 알려 준 정리 뒤 대화량이 있으면 그걸로, 없으면 다시 재 본다
+        const after = 'tokensAfter' in ran ? ran.tokensAfter : undefined
+        const fill = await leadFill($)
+        await changePower($, p => ({
+          ...p, lead: after ? { tokens: after, window: fill?.window ?? p.lead?.window ?? 200000 } : fill,
+        }))
+      }
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    await closeJob($).catch(() => undefined)
+    await change($, (o, now) => ({
+      ...o,
+      lead: log(set(o.lead, 'off', '퇴근', now), now, '퇴근'),
+      workers: o.workers.map(w => (w.ended === undefined ? { ...set(w, 'unfinished', '끝내지 못하고 퇴근', now), ended: now } : w)),
+    }))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const dm = await read($, demo)
+    const live = !dm.running // 시연 중이면 가짜 장면을 그린다 (실제 기록은 뒤에서 그대로 쌓임)
+    const o = live ? await read($, office) : dm.office
+    const v = await read($, view)
+    const now = await $.clock.now()
+    const width = Math.max(CW, e.props.bodyColumns)
+    lastWidth = width
+    const pick = (key: string) => () => update($, view, x => ({ ...(x ?? v), selected: key, shelf: false }))
+    const toggleShelf = () => update($, view, x => ({ ...(x ?? v), shelf: !(x ?? v).shelf }))
+    const items = v.tab === 'library' || v.shelf ? await shelfItems($, o) : []
+    // 책장 목록: 내 스킬(내가 만든 것) → 플러그인 스킬(플러그인별로 묶어 접어 둠). 줄마다 이름 + 한 줄 설명
+    const shelfList = (all: boolean) => {
+      const mine = items.filter(i => i.source === 'user')
+      const plug = items.filter(i => i.source !== 'user')
+      const groups = [...new Set(plug.map(i => i.plugin))].map(g => [g, plug.filter(i => i.plugin === g)] as [string, ShelfItem[]])
+      const more = all || v.shelfMore
+      const row = (i: ShelfItem, k: string) => (
+        <Box key={k + i.name} flexDirection="column">
+          <Text>
+            <Text bold color="suggestion">{'▌' + i.name}</Text>
+            {i.count ? <Text color="warning">{` ★ 이번 세션 ${i.count}번`}</Text> : ''}
+          </Text>
+          <Text dimColor>{'  ' + i.note}</Text>
+        </Box>
+      )
+      return (
+        <Box key="shelf-list" flexDirection="column" borderStyle="round" paddingX={1}>
+          <Text bold>📚 책장<Text dimColor>{all ? '' : '  (책장을 다시 누르면 접혀요)'}</Text></Text>
+          <Text key="h-mine" bold color="warning">{`내 스킬 ${mine.length}개`}<Text dimColor> — 내가 만들어 둔 것 (~/.claude/skills · commands, 이 프로젝트 .claude)</Text></Text>
+          {mine.length ? mine.map(i => row(i, 'm-')) : <Text dimColor>  아직 없어요</Text>}
+          <Text key="h-plug" bold>{`플러그인 스킬 ${plug.length}개`}<Text dimColor> — 설치한 플러그인에 딸려 온 것</Text></Text>
+          {more ? groups.flatMap(([g, list]) => [
+            <Text key={'g-' + g} bold dimColor>{`  ${g} 플러그인 · ${list.length}개`}</Text>,
+            ...list.map(i => row(i, 'p-')),
+          ]) : groups.length ? (
+            <Button key="shelf-more" plain onPress={() => update($, view, x => ({ ...(x ?? v), shelfMore: true }))}>
+              <Text color="suggestion">{'  ' + groups.map(([g, list]) => `${g} ${list.length}`).join(' · ') + '  ▾ 펼치기'}</Text>
+            </Button>
+          ) : null}
+        </Box>
+      )
+    }
+    const tab = (t: View['tab']) => () => update($, view, x => ({ ...(x ?? v), tab: t }))
+
+    const T = $.ui.resolve(e)
+    const { Box, Text, Button } = T
+
+    const r = running(o)
+    const done = o.workers.filter(w => w.status === 'done')
+    const situation = [
+      `팀장: ${o.lead.action}`,
+      r.length ? `일하는 자리 ${[...new Set(r.map(unitOf))].join(', ')}` : '',
+      done.length ? `보고 완료 ${done.length}건` : '',
+    ].filter(Boolean).join(' · ')
+
+    const tabs = (
+      <Box key="tabs">
+        <Button key="tab-office" plain onPress={tab('office')}>
+          <Text bold={v.tab === 'office'} dimColor={v.tab !== 'office'}>{v.tab === 'office' ? '▣' : '□'} 사무실</Text>
+        </Button>
+        <Text>  </Text>
+        <Button key="tab-library" plain onPress={tab('library')}>
+          <Text bold={v.tab === 'library'} dimColor={v.tab !== 'library'}>{v.tab === 'library' ? '▣' : '□'} 도서관</Text>
+        </Button>
+        <Text>  </Text>
+        <Button key="tab-help" plain onPress={() => update($, view, x => ({ ...(x ?? v), tab: 'office' as const, guide: !(x ?? v).guide, shelf: false }))}>
+          <Text bold={!!v.guide} dimColor={!v.guide} color={v.guide ? 'suggestion' : undefined}>? 도움말</Text>
+        </Button>
+      </Box>
+    )
+
+    if (v.tab === 'library') {
+      return (
+        <Box flexDirection="column">
+          {tabs}
+          {shelfList(true)}
+        </Box>
+      )
+    }
+
+    // 맨 위 계기판: 팀장 피로도 · 전기세 (따뜻한 캡슐 = 사람, 시안 LED = 전기)
+    const pw = live ? await read($, power) : dm.power
+    const cells = width >= 56 ? 10 : width >= 40 ? 6 : 4
+    const leadPct = percentOf(pw.lead)
+    const st = leadPct !== undefined ? stageOf(leadPct) : undefined
+    const [fOn, fOff] = bar((leadPct ?? 0) / 100, cells)
+    const fatigueRow = rowOf(T, 'fatigue-rest', width - 9, [
+      ['(' + '█'.repeat(fOn), { color: st?.color }],
+      ['░'.repeat(fOff) + ')', { dimColor: true }],
+      [leadPct !== undefined ? ` ${leadPct}% ${st!.name}` : ' 아직 안 잼', { bold: true, color: st?.color }],
+      [pw.lead ? ` · 팀장 대화 ${man(pw.lead.tokens)}/${man(pw.lead.window)}` : ' · 다음 대답 때 재요', { dimColor: true }],
+      ...(() => {
+        // 직원 중 가장 피곤한 사람 (직원마다 따로 잼)
+        const f = fillsOf(o, pw)
+        const top = Object.entries(f).filter(([k]) => k !== 'main').sort((a, b) => b[1] - a[1])[0]
+        return top ? [[` · 직원 최고 ${top[1]}% ${top[0]}`, { color: stageOf(top[1]).color }] as Piece] : []
+      })(),
+    ])
+    const usualFrac = pw.usual ? pw.today / pw.usual : undefined
+    const over = usualFrac !== undefined && usualFrac > 1
+    const [eOn, eOff] = bar(usualFrac ?? 0, cells)
+    const powerRow = rowOf(T, 'power', width, [
+      ['전기세 ', { bold: true, color: LED.num }],
+      usualFrac !== undefined ? ['[' + '▮'.repeat(eOn), { color: over ? LED.warn : LED.on }] : [''],
+      usualFrac !== undefined ? ['▯'.repeat(eOff) + '] ', { color: LED.off }] : [''],
+      [`오늘 ${man(pw.today)}`, { bold: true, color: LED.num }],
+      usualFrac !== undefined
+        ? [` · 평소의 ${Math.round(usualFrac * 100)}%${over ? ' (많이 쓰는 중)' : ''}`, over ? { color: LED.warn } : { dimColor: true }]
+        : [' · 평소 기록 쌓는 중', { dimColor: true }],
+      [' · 사무실 표시 0', { dimColor: true }],
+    ])
+    const jobN = sum(pw.job)
+    const jobRow = rowOf(T, 'job', width, [
+      ['  이번 일 ', { dimColor: true }],
+      [man(jobN), { bold: true, color: LED.num }],
+      [pw.jobUsual && jobN ? ` (평소 일의 ${Math.round((jobN / pw.jobUsual) * 100)}%)` : '', { dimColor: true }],
+      [jobN ? ` · ${parts(pw.job)}` : '', { dimColor: true }],
+    ])
+    const tired = leadPct !== undefined && leadPct >= 70
+      ? <Text key="tired" color={st?.color}>팀장이 많이 피곤해요. 피로도를 누르면 정리하는 법이 나와요.</Text>
+      : null
+    const toggleTired = () => update($, view, x => ({ ...(x ?? v), tired: !(x ?? v).tired, guide: false, shelf: false }))
+    // 피로도 안내 카드: 단계별 할 일 + 입력창에 글만 넣어 주는 단추 (Enter 는 사람이 누름 → 누르기 전엔 토큰 0)
+    const advice = adviceOf(leadPct)
+    const fill = (text: string) => async () => {
+      try {
+        const r = await $.prompt.fill({ text })
+        $.ui.toast(r.isFilled ? '입력창에 넣었어요. 확인하고 Enter 를 누르세요' : '입력창에 못 넣었어요')
+      } catch {
+        $.ui.toast('입력창에 못 넣었어요')
+      }
+    }
+    const tiredCard = v.tired ? (
+      <Box key="tired-card" flexDirection="column" borderStyle="round" borderColor={st?.color} paddingX={1}>
+        <Text bold color={st?.color}>{`팀장 피로도 ${advice.title}`}</Text>
+        {advice.lines.map((l, i) => <Text key={'adv' + i}>{l}</Text>)}
+        <Text dimColor>피로도 = 팀장이 지금 들고 있는 대화량 ÷ 최대치. 직원은 각자 따로 (일이 끝나면 다음 직원은 0% 부터).</Text>
+        {advice.act ? (
+          <Box key="tired-actions" columnGap={2} marginTop={1} flexWrap="wrap">
+            <Button key="fill-note" onPress={fill('지금까지 한 일 · 정한 것 · 남은 일을 HANDOFF.md 에 정리해 줘. 다음 대화에서 이 파일부터 읽고 이어 갈 거야.')}>📝 정리 부탁 문장 넣기</Button>
+            <Button key="fill-compact" onPress={fill('/compact')}>/compact 넣기</Button>
+            <Button key="fill-clear" onPress={fill('/clear')}>/clear 넣기 (정리 먼저!)</Button>
+          </Box>
+        ) : null}
+        <Button key="tired-close" plain onPress={toggleTired}><Text dimColor>닫기</Text></Button>
+      </Box>
+    ) : null
+
+    const L = layout(o, width, unitOf, jobOfW)
+    const staff = seatsOf(o, unitOf)
+    const sel = v.selected === 'main' || staff.some(s => s.role === v.selected) ? v.selected : 'main'
+
+    // 고른 직원의 이야기
+    const detail: JSX.Element[] = []
+    const line = (key: string, text: string, props: Record<string, unknown> = {}) =>
+      detail.push(<Text key={key} {...props}>{text}</Text>)
+    if (sel === 'main') {
+      line('d-h', '팀장 · 메인 Claude', { bold: true })
+      line('d-now', `지금: ${o.lead.action} · ${ago(now - o.lead.since)}째`)
+      line('d-f', leadPct !== undefined
+        ? `피로도: ${leadPct}% ${st!.name} · 들고 있는 대화 ${man(pw.lead!.tokens)} / ${man(pw.lead!.window)} 토큰`
+        : '피로도: 아직 안 잼 (다음 대답 때 재요)', { color: st?.color })
+      const mineT = pw.byWorker.main
+      if (sum(mineT)) line('d-pw', `전기세 몫 (이번 세션): ${man(sum(mineT))} · ${parts(mineT!)}`, { color: LED.num })
+      if (o.prompt) line('d-p', `사장님 지시: 「${o.prompt}」 · ${ago(now - (o.promptAt ?? now))} 전`)
+      if (o.said && (o.lead.status === 'idle' || o.lead.status === 'wait_report')) line('d-s', `마지막으로 한 말: ${o.said}`, { dimColor: true })
+      if (o.workers.length) {
+        line('d-ah', '맡긴 일:', { bold: true })
+        o.workers.slice(-6).reverse().forEach((w, i) =>
+          line('d-a' + i, `  ${unitOf(w)}${w.member ? ` ${w.member}` : ''} — ${w.task || '(설명 없음)'} · ${w.status === 'done' ? '보고 완료' : w.action}`))
+      }
+      if (o.lead.recent.length) {
+        line('d-rh', '한 일:', { bold: true })
+        o.lead.recent.slice(0, 6).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
+      }
+    } else {
+      const list = o.workers.filter(w => unitOf(w) === sel).reverse()
+      const w = list.find(x => x.ended === undefined) ?? list[0]
+      line('d-h', `${sel}${list.length > 1 ? ` · 이번 세션 ${list.length}번 출근` : ''}`, { bold: true })
+      if (w) {
+        const kinds = [...new Set(list.map(x => x.role))].join(', ')
+        if (kinds !== sel) line('d-k', `에이전트 종류: ${kinds}`, { dimColor: true })
+        if (list.some(x => x.team)) {
+          // 팀 자리: 팀원마다 한 줄 (출근 순). 사무실엔 팀 하나 = 한 자리만 그린다
+          const state = (x: typeof w) =>
+            x.status === 'done' ? '보고 완료 ✓' : x.status === 'unfinished' ? '못 끝냄' : x.ended !== undefined ? '퇴근' : x.action
+          line('d-mh', `팀원 ${list.length}명 · 일하는 중 ${list.filter(x => x.ended === undefined).length}명`, { bold: true })
+          ;[...list].reverse().forEach((x, i) => line('d-m' + i,
+            `  ${x.member ?? i + 1}  ${state(x)} — ${x.task || '(설명 없음)'}${x.handback ? ` · 서류 「${clip(x.handback, 40)}」` : ''}`,
+            { dimColor: x.ended !== undefined }))
+        }
+        line('d-now', w.status === 'done' ? `상태: 보고 완료 · ${ago(now - (w.ended ?? now))} 전` : `지금: ${w.action} · ${ago(now - w.since)}째`)
+        if (w.task) line('d-t', `맡은 일: ${w.task} (팀장이 맡김)`)
+        const fill = (live && w.ended === undefined ? await workerFill($, w.id) : undefined) ?? pw.workers[w.id]
+        const wp = percentOf(fill)
+        if (wp !== undefined) {
+          const ws = stageOf(wp)
+          line('d-f', `피로도: ${wp}% ${ws.name} · 들고 있는 대화 ${man(fill!.tokens)} / ${man(fill!.window)} 토큰`, { color: ws.color })
+          if (wp >= 70) line('d-fn', '대화가 많이 찼어요. 남은 일은 새 직원에게 나눠 맡기면 덜 피곤해요 (일이 끝나면 이 대화는 버려지고 다음 직원은 0% 부터).', { dimColor: true })
+        }
+        const share = list.reduce((acc, x) => (pw.byWorker[x.id] ? plus(acc, pw.byWorker[x.id]!) : acc), ZERO)
+        if (sum(share)) {
+          line('d-pw', `전기세 몫${list.length > 1 ? ` (${list.length}번 출근 합계)` : ''}: ${man(sum(share))} · ${parts(share)}`, { color: LED.num })
+          line('d-pn', '실제 AI 직원이라 팀장과 따로 대화를 들고 일해요. 직원이 많을수록 전기세가 더 나와요.', { dimColor: true })
+        }
+        if (w.handback) line('d-hb', `넘긴 서류: 「${w.handback}」`, { color: 'suggestion' })
+        if (w.error) line('d-e', `⚠ 실패: ${w.error}`, { color: 'error' })
+        if (w.recent.length) {
+          line('d-rh', '한 일:', { bold: true })
+          w.recent.slice(0, 6).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
+        }
+      }
+    }
+    const mine = o.workers.filter(w => unitOf(w) === sel).reverse()
+    const agentId = !live || sel === 'main' ? undefined : (mine.find(w => w.ended === undefined) ?? mine[0])?.id
+
+    // 말풍선 자리: 자기 책상 폭이 기본, 옆자리에 말풍선이 없으면 그 자리 반까지, 줄 끝이면 끝까지 넓힌다.
+    // (팀장은 그 줄에 혼자라 줄 전체를 쓴다.) 그래도 좁으면 짧은 말로 바꾼다.
+    const away = new Set(L.seats.filter(s => isGone(o, L, s.key, now)).map(s => s.key)) // 퇴근한 자리
+    const sayOf = (s: (typeof L.seats)[number]) =>
+      s.worker && s.worker.status !== 'desk' && !away.has(s.key) ? bubbles(s.worker.status, s.worker.tool, s.worker.target) : []
+    const spots = new Map<string, { left: number; text: string }>()
+    const byRow = new Map<number, (typeof L.seats)[number][]>()
+    for (const s of L.seats) byRow.set(s.row, [...(byRow.get(s.row) ?? []), s])
+    for (const row of byRow.values()) {
+      row.sort((a, b) => a.col - b.col)
+      row.forEach((s, i) => {
+        const say = sayOf(s)
+        if (!say.length) return
+        const prev = row[i - 1]
+        const nxt = row[i + 1]
+        const half = Math.floor(CW / 2)
+        const lo = !prev ? 0 : sayOf(prev).length ? prev.col + CW : prev.col + half
+        const hi = !nxt ? L.cols : sayOf(nxt).length ? nxt.col : nxt.col + half
+        const room = Math.max(4, hi - lo)
+        const text =
+          say.map(t => ' ' + t + ' ').find(t => dw(t) <= room) ?? say.find(t => dw(t) <= room) ?? fit(say[say.length - 1]!, room)
+        const w = dw(text)
+        const left = Math.max(lo, Math.min(hi - w, s.col + half - Math.floor(w / 2)))
+        spots.set(s.key, { left, text })
+      })
+    }
+
+    // 말 걸기: 직원을 누르면 그 에이전트에게 말을 건다
+    // 팀장 = 대화창에 사장님 말로, 직원 = 그 에이전트에게 메시지(SendMessage 와 같은 통로). 보낼 때만 토큰이 든다.
+    const { Input } = T
+    const talkTo = sel === 'main' ? 'main' : agentId
+    const talk = !live ? (
+      <Text key="talk-off" dimColor>시연 중엔 말 걸기가 안 돼요 (가짜 직원)</Text>
+    ) : talkTo ? (
+      <Box key="talk-box" flexDirection="column" marginTop={1}>
+        <Input key={'talk-' + (v.talks ?? 0)} label={`${sel}에게: `} submitLabel="보내기"
+          placeholder="할 말 쓰고 Enter · Claude 에게 보내져서 토큰이 들어요"
+          onSubmit={async value => {
+            const text = value.trim()
+            if (!text) return
+            try {
+              if (talkTo === 'main') {
+                await $.prompt.submit({ text, asUser: true })
+                $.ui.toast('팀장에게 보냈어요')
+              } else {
+                const r = await $.session.send({ to: { agentId: talkTo }, text })
+                $.ui.toast(r.isDelivered ? `${sel}에게 보냈어요` : `못 보냈어요: ${r.reason}`)
+                if (!r.isDelivered) return
+              }
+              const now2 = await $.clock.now()
+              await update($, office, x => onTalk(x ?? EMPTY, talkTo, text, now2))
+              await update($, view, x => ({ ...(x ?? v), talks: ((x ?? v).talks ?? 0) + 1 }))
+            } catch (err) {
+              $.ui.toast(`못 보냈어요: ${String(err)}`)
+            }
+          }} />
+      </Box>
+    ) : null
+
+    let scene: JSX.Element
+    if (e.surface === 'terminal') {
+      const { Raster } = $.ui.resolve(e)
+      scene = (
+        <Box key="floor" position="relative" width={L.cols} height={L.rows}>
+          <Raster key="scene" columns={L.cols} rows={L.rows} cells={encode(draw(o, L, now, new Date(now).getHours(), fillsOf(o, pw)), L.cols, L.rows)} />
+          <Box key="shelf-btn" position="absolute" top={1} left={Math.max(0, L.shelfX)}>
+            <Button key="shelf" plain onPress={toggleShelf}>
+              <Text inverse={!!v.shelf} color={v.shelf ? 'warning' : undefined} bold>{v.shelf ? '📚 책장 ▴' : '📚 책장 ▾'}</Text>
+            </Button>
+          </Box>
+          {L.seats.flatMap(s => {
+            const w = s.worker
+            const say = spots.get(s.key)
+            const isSel = s.key === sel
+            const tone = w?.status === 'unfinished' ? 'error' : w?.status === 'done' ? 'success' : w?.status === 'ask' ? 'warning' : undefined
+            const name = fit(s.name + (s.count > 1 ? ` ×${s.count}` : '') + (away.has(s.key) ? ' 퇴근' : ''), CW)
+            return [
+              say ? (
+                <Box key={'say-' + s.key} position="absolute" top={s.row} left={say.left}>
+                  <Button key={'bubble-' + s.key} plain onPress={pick(s.key)}>
+                    <Text color={tone} inverse>{say.text}</Text>
+                  </Button>
+                </Box>
+              ) : null,
+              // 이름표는 자리 가운데 (고른 사람은 굵게 · 색)
+              <Box key={'tag-' + s.key} position="absolute" top={s.row + TAG_ROW} left={s.col + Math.max(0, Math.floor((CW - dw(name)) / 2))}>
+                <Button key={'pick-' + s.key} plain onPress={pick(s.key)}>
+                  <Text bold={isSel} color={isSel ? 'suggestion' : undefined} dimColor={!isSel && away.has(s.key)}>
+                    {name}
+                  </Text>
+                </Button>
+              </Box>,
+            ]
+          })}
+        </Box>
+      )
+    } else {
+      scene = (
+      <Box key="floor" flexDirection="column">
+        <Button key="shelf" plain onPress={toggleShelf}>{v.shelf ? '📚 책장 접기' : '📚 책장 (스킬 목록)'}</Button>
+        {L.seats.map(s => (
+          <Button key={'pick-' + s.key} plain onPress={pick(s.key)}>
+            {(s.key === sel ? '▸ ' : '  ') + s.name + '  '}
+            <Text dimColor>{s.worker ? s.worker.action : ''}</Text>
+          </Button>
+        ))}
+      </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column">
+        {tabs}
+        {live ? null : rowOf(T, 'demo', width, [
+          [`▶ 시연 중 ${dm.step}/${dm.total}`, { bold: true, color: 'warning' }],
+          [' · 가짜 장면이라 Claude 를 부르지 않아요 (토큰 0)', { color: 'warning' }],
+          [' · 멈추기: /termimates 시연', { dimColor: true }],
+        ])}
+        <Box key="fatigue-line">
+          <Button key="fatigue" plain onPress={toggleTired}>
+            <Text bold color={st?.color} underline>{v.tired ? '피로도 ▾' : '피로도 ▸'}</Text>
+          </Button>
+          <Text> </Text>
+          {fatigueRow}
+        </Box>
+        {powerRow}
+        {jobRow}
+        {tired}
+        <Text bold>{o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음'}</Text>
+        <Text dimColor>{situation}</Text>
+        {scene}
+        {v.guide ? (
+          <Box key="guide" flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
+            <Text bold color="suggestion">👋 처음 오셨나요? TermiMates 사무실 사용법</Text>
+            <Text>여기는 지금 이 프로젝트(= 회사)의 사무실이에요. Claude 에게 일을 시키면 직원들이 출근해서 일하는 모습이 보여요.</Text>
+            <Text> </Text>
+            <Text><Text bold>팀장</Text> = 지금 대화하는 Claude. 일을 나누면 기획자 · 디자이너 · 개발자 · QA · 리서처가 문으로 출근해요 (팀이면 「QA 1팀」 한 자리).</Text>
+            <Text><Text bold>직원을 누르면</Text> 지금 하는 일 · 넘긴 서류 · 피로도 · 전기세가 보이고, 아래 칸에 말을 걸 수 있어요 (보낼 때만 토큰).</Text>
+            <Text><Text bold>📚 책장</Text>을 누르면 내 스킬 목록과 한 줄 설명. 스킬을 쓰면 담당 직원이 책을 꺼내 와 읽어요.</Text>
+            <Text><Text bold>맨 위</Text> 피로도 = 대화가 얼마나 찼는지 (70% 넘으면 새 세션 권함) · 전기세 = 쓴 토큰.</Text>
+            <Text> </Text>
+            <Text bold>명령</Text>
+            <Text>  /termimates          사무실 열기 · 닫기 (켜 둔 프로젝트는 다음에도 열림)</Text>
+            <Text>  /termimates 시연     가짜 장면 구경 (Claude 를 안 불러서 토큰 0)</Text>
+            <Text>  /termimates 웹       브라우저에서 큰 사무실 (http://127.0.0.1:8766)</Text>
+            <Text>  /termimates 도움말   이 안내 다시 보기</Text>
+            <Text dimColor>이 화면은 AI 를 부르지 않아요 (토큰 0). 기록은 이 컴퓨터에만 남아요.</Text>
+            <Box key="guide-actions" columnGap={2} marginTop={1}>
+              <Button key="guide-demo" onPress={async () => {
+                await update($, view, x => ({ ...(x ?? v), guide: false }))
+                void runDemo($)
+              }}>▶ 시연 보기</Button>
+              <Button key="guide-ok" onPress={() => update($, view, x => ({ ...(x ?? v), guide: false }))}>알겠어요</Button>
+            </Box>
+          </Box>
+        ) : null}
+        {tiredCard}
+        {v.shelf ? shelfList(false) : null}
+        <Box key="card" flexDirection="column" borderStyle="round" paddingX={1} display={v.shelf || v.guide || v.tired ? 'none' : 'flex'}>
+          {detail}
+          {talk}
+          {agentId ? (
+            <Box key="card-actions" columnGap={2}>
+              <Button key="open-agent" onPress={async () => {
+                const r2 = await $.ui.view({ agentId })
+                if (r2.deny) $.ui.toast(`대화를 열 수 없어요: ${r2.deny}`)
+              }}>이 직원 대화 보기</Button>
+              <Button key="open-main" onPress={() => $.ui.view({})}>메인 대화로</Button>
+            </Box>
+          ) : null}
+        </Box>
+      </Box>
+    )
+  })
+}

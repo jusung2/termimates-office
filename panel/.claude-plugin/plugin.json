@@ -1,0 +1,1 @@
+{"name": "termimates", "version": "0.14.0", "description": "TermiMates 사무실을 Claude Code 대화 옆 패널에 보여 줘요: 직원(에이전트)이 무슨 일을 하고 누구에게 서류를 넘기는지, 전기세(토큰) · 피로도(컨텍스트). 모델 토큰 0", "types": "./types/index.d.ts"}

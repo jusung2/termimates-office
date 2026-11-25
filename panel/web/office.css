@@ -1,0 +1,144 @@
+/* TermiMates 웹 사무실: 화면 전체를 쓰고, 창 크기에 맞춰 사무실이 다시 배치된다 */
+* { box-sizing: border-box; }
+[hidden] { display: none !important; } /* hidden 이 CSS display 에 덮이지 않게 */
+html, body { margin: 0; height: 100%; background: #1b1714; color: #efe7dc;
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased; }
+/* 칸 폭이 그림 때문에 늘어나지 않게 (minmax 0): 그림이 화면 틀을 넓히고 → 넓어진 틀로 다시 재는 악순환 방지 */
+body { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); overflow: hidden; }
+
+#hud { padding: 10px 16px 8px; background: linear-gradient(#26201b, #1f1a16); border-bottom: 1px solid #3a3029; z-index: 2; }
+.top { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.brand { font-size: 15px; letter-spacing: .2px; }
+.brand b { color: #ffd89b; }
+#project { color: #a89a8a; font-size: 12px; margin-left: 6px; }
+#demo { background: #f0b232; color: #2a1d05; font-weight: 700; font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.help { margin-left: auto; border: 1px solid #4a3d33; background: #2f2721; color: #ffd89b; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.help + .conn { margin-left: 8px; }
+#card code { background: #efe4d3; padding: 0 4px; border-radius: 4px; font-size: 11px; }
+.conn { margin-left: auto; font-size: 12px; color: #a89a8a; }
+.conn.ok::before { content: "● "; color: #3fa66b; }
+.conn.bad::before { content: "● "; color: #c9423a; }
+
+.meters { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; }
+
+/* 피로도: 따뜻한 캡슐 (사람) */
+.capsule { cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 6px; border-radius: 999px;
+  background: #2f2721; border: 1px solid #4a3d33; min-width: 250px; }
+.capsule canvas { width: 24px; height: 20px; image-rendering: pixelated; }
+.capsule .lbl { font-size: 12px; color: #cbbcab; white-space: nowrap; }
+.capsule .pill { flex: 1; height: 12px; border-radius: 999px; background: #1a1512; overflow: hidden; min-width: 80px;
+  box-shadow: inset 0 1px 2px #0008; }
+.capsule .pill i { display: block; height: 100%; width: 0; border-radius: 999px; background: #3fa66b;
+  transition: width .6s ease, background-color .6s ease; }
+.capsule .val { font-size: 12px; white-space: nowrap; }
+.capsule.lv3 { animation: tired 1.6s ease-in-out infinite; }
+@keyframes tired { 50% { border-color: #c9423a; } }
+
+/* 전기세: 어두운 LCD 계량기 + LED (기계) */
+.lcd { display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 6px; background: #13202b;
+  border: 1px solid #22394a; font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #5ce1e6; min-width: 330px; }
+.lcd.warn { border-color: #e07a3a; }
+.lcd .bolt { color: #ffd34d; }
+.lcd .lbl { font-family: inherit; font-size: 12px; color: #8fc9d3; }
+.lcd .leds { display: flex; gap: 2px; }
+.lcd .leds i { width: 7px; height: 12px; border-radius: 1px; background: #1e3340; }
+.lcd .leds i.on { background: #2bb3c0; box-shadow: 0 0 4px #2bb3c0aa; }
+.lcd.warn .leds i.on { background: #e07a3a; box-shadow: 0 0 4px #e07a3aaa; }
+.lcd .val { font-size: 13px; white-space: nowrap; }
+.lcd .sub { font-size: 11px; color: #8fc9d3; white-space: nowrap; }
+.zero { display: flex; align-items: center; font-size: 11px; color: #9c958c; padding: 0 8px; border-radius: 6px; background: #2a2622; }
+
+#order { margin-top: 8px; font-size: 14px; font-weight: 600; }
+#situation { margin-top: 2px; font-size: 12px; color: #b9ab9b; }
+
+#stage { position: relative; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; }
+#office { display: block; margin: 0 auto; cursor: default; }
+#office.hand { cursor: pointer; }
+#spark { width: 72px; height: 18px; }
+/* 책장 밑 「사무실 소식」 게시판: 접으면 최근 3줄, 누르면 10줄 */
+#news { position: absolute; z-index: 2; cursor: pointer; font-size: 11px; color: #2b2420; overflow: hidden;
+  border-radius: 4px; transition: width .25s ease, height .25s ease, box-shadow .25s ease; }
+#news .nh { font-weight: 700; color: #fff6e0; text-shadow: 0 1px 0 #0006; padding: 3px 6px 2px; display: flex; gap: 6px; white-space: nowrap; }
+#news .nh span { margin-left: auto; font-weight: 500; opacity: .85; }
+#newsList { display: flex; flex-direction: column; gap: 3px; padding: 0 5px 5px; }
+#newsList div { background: #fffdf3; border-radius: 2px; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 1px 2px #0004; }
+#newsList div:nth-child(2n) { background: #fff6c9; } #newsList div:nth-child(3n) { background: #e9f6ff; }
+#newsList time { color: #9c8f80; margin-right: 5px; font-variant-numeric: tabular-nums; }
+#newsList i { font-style: normal; color: #8b2a2a; font-weight: 700; margin-right: 4px; }
+#newsList .new { animation: note .5s ease-out; }
+@keyframes note { from { transform: translateX(8px); opacity: 0; } }
+#news.open { background: #f8f1e3; color: #2b2420; box-shadow: 0 14px 40px #000a; border: 2px solid #b9926a; }
+#news.open .nh { color: #5b3a22; text-shadow: none; border-bottom: 1px dashed #d8c6ae; padding: 6px 10px; }
+#news.open #newsList { padding: 6px 8px 8px; gap: 4px; }
+#news.open #newsList div { font-size: 12px; padding: 4px 8px; white-space: normal; }
+
+/* 카드 맨 위 「지금 화면」: 그 사람이 지금 하는 일을 모니터처럼 */
+#card .who { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+#card .who canvas { width: 48px; height: 64px; image-rendering: pixelated; background: #efe4d3; border-radius: 10px; }
+#card .screen { background: #0f151c; color: #d6f5d6; border-radius: 10px; padding: 0 0 8px; margin: 4px 0 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; box-shadow: inset 0 0 0 1px #24313d; overflow: hidden; }
+#card .screen .bar { display: flex; gap: 5px; align-items: center; padding: 6px 10px; background: #1b2530; color: #8fa3b5; font-size: 11px; }
+#card .screen .bar i { width: 8px; height: 8px; border-radius: 50%; background: #ff6b6b; }
+#card .screen .bar i:nth-child(2) { background: #fcc419; } #card .screen .bar i:nth-child(3) { background: #51cf66; }
+#card .screen .bar span { margin-left: 6px; }
+#card .screen .now { padding: 10px 12px 6px; font-size: 13px; color: #ffffff; word-break: break-all; line-height: 1.5; }
+#card .screen .now .dim { color: #8fa3b5; }
+#card .screen .now .ps { color: #51cf66; margin-right: 6px; }
+#card .screen .cur { display: inline-block; width: 7px; height: 13px; background: #d6f5d6; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+#card .screen .log { padding: 0 12px; color: #8fa3b5; font-size: 11px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#card .screen .log time { color: #5c7080; margin-right: 6px; }
+#card .screen .sub { padding: 2px 12px; color: #b8c7d4; font-size: 12px; }
+@keyframes blink { 50% { opacity: 0; } }
+.dots::after { content: ''; animation: dots 1.2s steps(4) infinite; }
+@keyframes dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+
+#empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: #cbbcab; }
+#empty code { background: #2f2721; padding: 1px 6px; border-radius: 4px; color: #ffd89b; }
+
+/* 직원을 누르면 오른쪽 카드 (좁은 창이면 아래에서 올라옴) */
+#card { position: fixed; right: 14px; top: 132px; bottom: 14px; width: 360px; overflow: auto; z-index: 3;
+  background: #fbf6ee; color: #2b2420; border-radius: 14px; padding: 16px 16px 20px; box-shadow: 0 12px 40px #000a;
+  animation: slide .22s ease-out; }
+@keyframes slide { from { transform: translateX(24px); opacity: 0; } }
+#card h2 { margin: 0 0 4px; font-size: 18px; }
+#card .kind { color: #8a7f74; font-size: 12px; margin-bottom: 10px; }
+#card .row { margin: 6px 0; font-size: 13px; line-height: 1.5; }
+#card .row b { color: #6b5d50; font-weight: 600; margin-right: 4px; }
+#card .paper { background: #fffdf5; border: 1px solid #e6dcc8; border-left: 4px solid #e0b23a; padding: 8px 10px;
+  border-radius: 6px; font-size: 13px; margin: 8px 0; }
+#card .err { background: #fdeceb; border-left-color: #c9423a; }
+#card ul { margin: 4px 0 0; padding-left: 0; list-style: none; }
+#card li { font-size: 12px; color: #5d5249; padding: 3px 0; border-bottom: 1px dashed #e8dfd3; }
+#card li time { color: #a3978b; margin-right: 6px; font-variant-numeric: tabular-nums; }
+#card li.dim { color: #a99f95; }
+#card .gauge { height: 8px; border-radius: 999px; background: #eadfd1; overflow: hidden; margin-top: 3px; }
+#card .gauge i { display: block; height: 100%; border-radius: 999px; }
+#card .note { margin-top: 14px; font-size: 12px; color: #8a7f74; background: #f2eadf; padding: 8px 10px; border-radius: 8px; }
+/* 책장 카드: 줄마다 차례로 떨어지듯 (주르륵) */
+#card h3 { margin: 14px 0 6px; font-size: 12px; color: #8a7f74; letter-spacing: .3px; }
+#card .srow { padding: 7px 10px; margin: 4px 0; border-radius: 8px; background: #f5ede1; border-left: 4px solid #c08a55;
+  animation: drop .32s ease-out both; animation-delay: calc(var(--i) * 32ms); }
+#card .srow:hover { background: #efe3d1; }
+#card .sname { display: flex; align-items: baseline; gap: 6px; font-size: 13px; }
+#card .sname b { color: #3b2f26; word-break: break-all; }
+#card .star { color: #b7791f; font-size: 12px; white-space: nowrap; }
+#card .role { margin-left: auto; font-size: 11px; color: #6b5d50; background: #e8dccb; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+#card .snote { font-size: 12px; color: #6b5d50; margin-top: 2px; line-height: 1.45; }
+#card .more { margin-top: 10px; width: 100%; border: 1px dashed #c9b79f; background: #fbf6ee; color: #6b5d50; border-radius: 8px;
+  padding: 8px; font: inherit; font-size: 12px; cursor: pointer; }
+@keyframes drop { from { transform: translateY(-8px); opacity: 0; } }
+
+#close { position: absolute; right: 10px; top: 8px; border: 0; background: none; font-size: 16px; cursor: pointer; color: #8a7f74; }
+
+@media (max-width: 760px) {
+  #card { left: 10px; right: 10px; top: auto; width: auto; max-height: 55vh; bottom: 10px; animation-name: up; }
+  @keyframes up { from { transform: translateY(24px); opacity: 0; } }
+  .capsule, .lcd { min-width: 0; flex: 1 1 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .capsule.lv3, #card, #newsList .new, #card .srow { animation: none; }
+  #news { transition: none; }
+  .capsule .pill i { transition: none; }
+}

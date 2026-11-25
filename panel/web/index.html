@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TermiMates 사무실</title>
+  <link rel="stylesheet" href="/office.css">
+</head>
+<body>
+  <header id="hud">
+    <div class="top">
+      <div class="brand"><b>TermiMates</b> <span id="project"></span></div>
+      <div id="demo" hidden></div>
+      <button id="help" class="help" title="사용법">? 도움말</button>
+      <div id="conn" class="conn">연결 중…</div>
+    </div>
+    <div class="meters">
+      <div id="fatigue" class="capsule" title="팀장이 지금 들고 있는 대화량 ÷ 최대치 (토큰 0 으로 계산)">
+        <canvas id="face" width="48" height="40"></canvas>
+        <span class="lbl">팀장 피로도</span>
+        <div class="pill"><i></i></div>
+        <b class="val">–</b>
+      </div>
+      <div id="meter" class="lcd" title="전기세 = 토큰. 대화 기록에 이미 남은 숫자만 읽어요">
+        <span class="bolt">⚡</span>
+        <span class="lbl">전기세</span>
+        <div class="leds"></div>
+        <b class="val">–</b>
+        <canvas id="spark" width="72" height="18" title="이 창을 연 뒤 오늘 전기세가 늘어난 모양"></canvas>
+        <span class="sub"></span>
+      </div>
+      <div class="zero" title="이 사무실 화면은 AI 를 부르지 않아요">🔌 사무실 표시 0</div>
+    </div>
+    <div id="order"></div>
+    <div id="situation"></div>
+  </header>
+  <main id="stage">
+    <canvas id="office"></canvas>
+    <div id="news" title="누르면 펼쳐지고 다시 누르면 접혀요"><div class="nh">📋 사무실 소식 <span id="newsTog">▾ 10줄</span></div><div id="newsList"></div></div>
+    <div id="empty" hidden>
+      <b>아직 사무실 소식이 없어요</b>
+      <p>Claude Code 에서 <code>/termimates 웹</code> 으로 켜면 여기에 사무실이 보여요.<br>
+         가짜 장면으로 보고 싶으면 <code>/termimates 시연</code> · <code>/termimates 시연 qa</code></p>
+    </div>
+  </main>
+  <aside id="card" hidden>
+    <button id="close" title="닫기">✕</button>
+    <div id="cardBody"></div>
+  </aside>
+  <script src="/sprites.js"></script>
+  <script src="/office.js"></script>
+</body>
+</html>
