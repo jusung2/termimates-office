@@ -71,7 +71,9 @@ export function adviceOf(pct: number | undefined): { title: string; lines: strin
   if (pct < 40) return { title: `${pct}% 쌩쌩 — 괜찮아요`, lines: ['그대로 일하면 돼요.'], act: false }
   if (pct < 70) {
     return { title: `${pct}% 하품 — 아직 괜찮아요`,
-      lines: ['지금 일은 그대로 이어 가도 돼요.', '전혀 다른 큰 일은 새 대화(/clear)에서 시작하면 전기세가 덜 나와요 (매번 들고 있는 대화를 다시 읽어서).'], act: true }
+      lines: ['하던 일을 이어 가는 거면 그대로 두세요.',
+        'Claude 는 대답할 때마다 지금까지 대화를 처음부터 다시 읽어요. 상관없는 새 일을 여기서 시키면 앞 이야기까지 매번 다시 읽느라 전기세가 더 나와요.',
+        '→ 새 일이면 /clear 로 새 대화를 열고 시키세요.'], act: true }
   }
   const head = pct < 90 ? `${pct}% 피곤 — 정리할 때예요` : `${pct}% 녹초 — 곧 Claude 가 알아서 정리(자동 compact)해요`
   return { title: head, lines: [

@@ -830,7 +830,7 @@
     let body = '';
     if (p == null) body = '<div class="row">Claude 가 한 번 대답하면 대화가 얼마나 찼는지 재요.</div>';
     else if (p < 40) body = '<div class="row">괜찮아요. 그대로 일하면 돼요.</div>';
-    else if (p < 70) body = '<div class="row">지금 일은 그대로 이어 가도 돼요.</div><div class="row">전혀 다른 큰 일은 새 대화(<code>/clear</code>)에서 시작하면 전기세가 덜 나와요 — 매번 들고 있는 대화를 다시 읽거든요.</div>';
+    else if (p < 70) body = '<div class="row">하던 일을 이어 가는 거면 그대로 두세요.</div><div class="row">Claude 는 대답할 때마다 지금까지 대화를 처음부터 다시 읽어요. 상관없는 새 일을 여기서 시키면 앞 이야기까지 매번 다시 읽느라 전기세가 더 나와요.</div><div class="row"><b>→ 새 일이면</b> <code>/clear</code> 로 새 대화를 열고 시키세요.</div>';
     else body = `<div class="row"><b>${p < 90 ? '정리할 때예요.' : '곧 Claude 가 알아서 정리(자동 compact)해요.'}</b> 하던 일을 마무리하고 둘 중 하나:</div>
       <div class="paper">① 같은 일을 이어 갈 거면 → <code>/compact</code><br><span style="color:#8a7f74">지금까지를 요약해서 대화를 가볍게. 흐름은 남아요.</span></div>
       <div class="paper">② 다른 일로 넘어갈 거면 → 지금까지 한 일 · 정한 것 · 남은 일을 파일(예: HANDOFF.md)에 적게 한 뒤 → <code>/clear</code><br>
