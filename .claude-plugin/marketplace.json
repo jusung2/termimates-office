@@ -9,7 +9,7 @@
       "name": "termimates",
       "source": "./panel",
       "description": "Claude Code 대화 옆 패널에 픽셀 사무실을 보여 줘요 (직원 · 일 · 서류 전달, 전기세 · 피로도, 토큰 0)",
-      "version": "0.14.1"
+      "version": "0.14.2"
     }
   ]
 }

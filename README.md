@@ -132,6 +132,18 @@ AI 가 지금 무엇을 하는지, 누구에게 일을 나눴는지, 토큰을 �
 - **웹 사무실**(`/termimates 웹`)은 터미널과 상관없이 브라우저에서 보여요 (Chrome · Safari · Edge 등).
 - 다른 터미널에서 써 보셨으면 잘 되는지 이슈로 알려 주세요 — 이 표에 더할게요.
 
+### 🩹 사무실 화면이 깨질 때
+
+| 이렇게 보이면 | 이렇게 해 보세요 |
+|---|---|
+| 그림이 **두 배로 넓어지거나** 칸이 밀려서 뒤죽박죽 | 터미널 설정에서 **「모호한 폭 문자를 넓게(Ambiguous width as wide / double width)」 를 끄세요.** 그림에 쓰는 `▀` 문자가 2칸으로 잡히면 이렇게 깨져요. (iTerm2: Profiles › Text › *Treat ambiguous-width characters as double width* 해제) |
+| 가로 **줄무늬 · 틈**이 보여요 | **줄 간격(line height)을 1.0 (100%)** 으로 맞추세요. 줄 사이가 벌어지면 위아래 칸 사이에 틈이 생겨요. |
+| 색이 **거칠거나 이상해요** (몇 가지 색으로 뭉개짐) | 트루컬러를 지원하는 터미널을 쓰세요 (위 표). tmux 안이면 `~/.tmux.conf` 에 `set -ga terminal-overrides ",*:Tc"` 를 넣고 tmux 를 다시 켜세요. 터미널에서 `echo $COLORTERM` 이 `truecolor` 면 OK. |
+| 한글 · 이름표 글자가 **겹치거나 어긋나요** | 한글이 들어간 **고정폭 글꼴**(예: D2Coding, Sarasa Mono K, 네이버 나눔고딕코딩)을 쓰세요. |
+| 패널이 **좁아서 잘려요** | 터미널 창을 넓히거나 글자 크기를 줄이세요(`⌘ -`). 넓으면(약 110칸↑) 대화창 옆에 붙어요. `/termimates` 두 번(닫았다 열기)도 도움이 돼요. |
+| 업데이트했는데 **예전 그림** 그대로 | `/reload-plugins` 또는 Claude Code 를 새로 켜세요. 새 버전 받기: `/plugin marketplace update termimates` → `/plugin update termimates@termimates` |
+| 그래도 깨져요 | `/termimates 웹` 으로 브라우저에서 보세요 (터미널과 상관없어요). 깨진 화면 사진(대화 내용은 가리고)과 터미널 이름을 **이슈**로 남겨 주시면 고칠게요. |
+
 ## 🧰 필요한 것
 
 - **Claude Code** — 플러그인 패널(mod)을 지원하는 최신 버전 (2.1.332 에서 확인)

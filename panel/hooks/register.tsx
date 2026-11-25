@@ -978,6 +978,7 @@ export const register: Register = on => {
             <Text>  /termimates 시연     가짜 장면 구경 (Claude 를 안 불러서 토큰 0)</Text>
             <Text>  /termimates 웹       브라우저에서 큰 사무실 (http://127.0.0.1:8766)</Text>
             <Text>  /termimates 도움말   이 안내 다시 보기</Text>
+            <Text dimColor>그림이 깨져 보이면: 터미널의 「모호한 폭 문자를 넓게」 끄기 · 줄 간격 1.0 · 창 넓히기 (설명서 「화면이 깨질 때」), 아니면 /termimates 웹.</Text>
             <Text dimColor>이 화면은 AI 를 부르지 않아요 (토큰 0). 기록은 이 컴퓨터에만 남아요.</Text>
             <Box key="guide-actions" columnGap={2} marginTop={1}>
               <Button key="guide-demo" onPress={async () => {
