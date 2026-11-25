@@ -19,7 +19,8 @@ export type Worker = {
   teammate?: boolean
   error?: string
   recent: [number, string][]
-  job?: string // 짧은 한글 역할 (기획자 · 디자이너 · 개발자 · QA · 리서처). 맡긴 일 설명으로도 정함
+  job?: string // 이름표: 사용자가 정한 이름 · 내가 만든 에이전트 이름 그대로 · 기본/플러그인은 쉬운 역할
+  family?: string // 생김새용 기본 역할 (기획자 · 디자이너 · 개발자 · QA · 리서처)
   team?: string // 팀 번호 (「QA 1팀」 의 1). 있으면 사무실엔 팀 하나 = 한 자리
   member?: string // 팀 안 번호 (「1-2」)
 }
@@ -35,10 +36,12 @@ export type Office = {
   skillUses: Record<string, { count: number; last: number }>
   shelf?: { at: number; who: string; book: string }[] // 책장에 책(스킬) 꺼내러 간 일 (who: 'main' 또는 직원 id)
   todos?: { text: string; state: 'todo' | 'doing' | 'done' }[] // 팀장의 할 일 목록 (웹 화이트보드)
+  waiting?: { at: number; who: string; what: string; id?: string } // 사장님 확인(허락 · 질문)을 기다리는 중 (id = 그 호출)
 }
 
 export type View = {
-  tab: 'office' | 'library'; selected: string; skill?: string
+  tab: 'office' | 'library' | 'roster'; selected: string; skill?: string
+  report?: boolean // 이번 일 보고서 카드
   talks?: number // 보낸 말 수 (입력칸 새로)
   shelf?: boolean // 사무실에서 책장을 눌러 스킬 목록을 펼쳤나
   shelfMore?: boolean // 플러그인 스킬까지 펼쳤나
@@ -64,13 +67,25 @@ export type Power = {
   today: number // 오늘 모든 세션 합계
   usual?: number // 최근 7일(오늘 빼고) 하루 평균
   jobUsual?: number // 최근 일들의 평균
+  jobBy?: Record<string, Tok> // 이번 일에서 사람별 몫 (보고서용)
 }
 
-/** 시연 (/termimates 시연): 가짜 장면. 실제 사무실 · 전기세와 따로 둔다 */
-export type Demo = { running: boolean; office: Office; power: Power; step: number; total: number }
+/** 시연 (/termimates 시연) · 다시 보기: 가짜 장면. 실제 사무실 · 전기세와 따로 둔다 */
+export type Demo = { running: boolean; office: Office; power: Power; step: number; total: number; label?: string }
+
+/** 이번 일에서 일어난 일 (다시 보기용). k: prompt · spawn · start · end · done */
+export type LogEntry = { t: number; k: string; a: unknown[] }
+
+/** 이번 일 보고서 */
+export type Report = {
+  at: number; prompt: string; mins: number; fails: number; papers: number; tokens: number; top?: string
+  units: { key: string; people: number; mins: number; fails: number; papers: number; tokens: number }[]
+}
+
+export type Replay = { from: number; log: LogEntry[]; report?: Report }
 
 declare module 'claude-code' {
   interface PluginState {
-    termimates: { office: Shaped<Office>; view: Shaped<View>; power: Shaped<Power>; demo: Shaped<Demo> }
+    termimates: { office: Shaped<Office>; view: Shaped<View>; power: Shaped<Power>; demo: Shaped<Demo>; replay: Shaped<Replay> }
   }
 }

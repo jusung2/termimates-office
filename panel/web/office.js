@@ -68,6 +68,7 @@
   }
   function bubbleText(w) {
     if (!w || w.status === 'desk' || w.status === 'off') return null;
+    if (w.status === 'ask' && snap && snap.office.waiting && snap.office.waiting.who === w.id) return { long: '확인해 주세요!', short: '확인!' };
     if (w.status !== 'work') return { long: BUBBLE[w.status], short: BUBBLE[w.status] };
     const t = w.target || '', v = VERB[w.tool] || '일하는 중';
     let long = v;
@@ -97,7 +98,7 @@
     units.forEach((u, i) => {
       const r = Math.floor(i / perRow), c = i % perRow;
       const w = o.workers.find((x) => x.id === u.worker);
-      seats.push(mkSeat({ key: u.key, job: u.job, name: u.key, worker: w, team: u.team, members: u.members, count: u.count }, left + c * SLOT_W, staffTop + r * ROW_H, r, false));
+      seats.push(mkSeat({ key: u.key, job: u.family || u.job, name: u.key, worker: w, team: u.team, members: u.members, count: u.count }, left + c * SLOT_W, staffTop + r * ROW_H, r, false));
     });
     const rows = Math.max(1, Math.ceil(units.length / perRow));
     const NEWS_H = 92;
@@ -476,6 +477,7 @@
     if (w.status === 'work' && age < 2500) return ['!', '#fcc419', '#2b2420'];
     if (w.status === 'think') return ['…', '#868e96', '#ffffff'];
     if (w.status === 'done' && now - (w.ended || w.since) < 9000) return ['✓', '#2f9e44', '#ffffff'];
+    if ((w.status === 'work' || w.status === 'think') && age > 5 * 60000) return ['…', '#e07a3a', '#ffffff']; // 5분 넘게 같은 일
     return null;
   }
   function zzz(c, x, y, now) {
@@ -722,7 +724,12 @@
     $('project').textContent = snap.project ? '· ' + base(snap.project) : '';
     const dm = $('demo');
     dm.hidden = !snap.demo;
-    if (snap.demo) dm.textContent = `▶ 시연 중 ${snap.demo.step}/${snap.demo.total} · 가짜 장면 (토큰 0)`;
+    if (snap.demo) dm.textContent = snap.demo.label ? `▶ ${snap.demo.label} 중 ${snap.demo.step}/${snap.demo.total} · 방금 일을 빠르게 (토큰 0)` : `▶ 시연 중 ${snap.demo.step}/${snap.demo.total} · 가짜 장면 (토큰 0)`;
+    // 🔔 사장님 확인 기다림
+    const wt = $('wait');
+    wt.hidden = !o.waiting;
+    if (o.waiting) wt.textContent = `🔔 사장님 확인 필요 — ${o.waiting.what} · ${ago(Date.now() - o.waiting.at)}째`;
+    $('report').hidden = !snap.report;
     $('order').textContent = o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음';
     const run = (o.workers || []).filter((w) => w.ended == null && !w.teammate);
     const done = (o.workers || []).filter((w) => w.status === 'done').length;
@@ -813,15 +820,37 @@
     const mine = items.filter((i) => i.source === 'user'), plug = items.filter((i) => i.source !== 'user');
     const groups = [...new Set(plug.map((i) => i.plugin || '기타'))].map((g) => [g, plug.filter((i) => (i.plugin || '기타') === g)]);
     let n = 0;
-    const row = (i) => `<div class="srow" style="--i:${n++}"><div class="sname"><b>${esc(i.name)}</b>${i.count ? `<span class="star">★ 이번 세션 ${i.count}번</span>` : ''}</div><div class="snote">${esc(i.note)}</div></div>`;
+    const row = (i) => `<div class="srow" style="--i:${n++};cursor:pointer" data-copy="/${esc(i.name)} " title="누르면 /${esc(i.name)} 복사"><div class="sname"><b>${esc(i.name)}</b>${i.count ? `<span class="star">★ 이번 세션 ${i.count}번</span>` : ''}</div><div class="snote">${esc(i.note)}</div></div>`;
     return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📚 책장</h2><div class="kind">스킬을 쓰면 직원이 책장에 와서 책을 꺼내 가요</div></div></div>` +
       (items.length ? '' : '<div class="row">아직 스킬 목록을 못 받았어요 (패널을 새로 켜면 와요)</div>') +
+      '<div class="note" style="margin-top:0">줄을 누르면 <code>/스킬이름</code> 이 복사돼요 — Claude Code 입력창에 붙여 넣으세요.</div>' +
       `<h3>내 스킬 ${mine.length}개 <span style="font-weight:400">— 내가 만들어 둔 것 (~/.claude/skills · commands, 이 프로젝트 .claude)</span></h3>` +
       (mine.length ? mine.map(row).join('') : '<div class="row">아직 없어요</div>') +
       `<h3>플러그인 스킬 ${plug.length}개 <span style="font-weight:400">— 설치한 플러그인에 딸려 온 것</span></h3>` +
       (shelfMore ? groups.map(([g, list]) => `<h3 style="margin-top:8px">${esc(g)} 플러그인 · ${list.length}개</h3>${list.map(row).join('')}`).join('')
         : groups.length ? `<button class="more" data-more="1">${groups.map(([g, list]) => `${esc(g)} ${list.length}`).join(' · ')} ▾ 펼치기</button>` : '');
   }
+  // 📋 이번 일 보고서 (다시 보기는 패널에서 누르면 여기에도 같이 보여요)
+  function reportCard() {
+    const r = snap.report;
+    if (!r) return '<div class="row">아직 보고서가 없어요. 일이 끝나면 생겨요.</div>';
+    const people = r.units.reduce((n, u) => n + u.people, 0);
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📋 이번 일 보고서</h2><div class="kind">「${esc(r.prompt)}」</div></div></div>
+      <div class="row"><b>걸린 시간</b>${r.mins}분 · 자리 ${r.units.length}개 (직원 ${people}명) · 서류 ${r.papers}장 · 실패 ${r.fails}번</div>
+      <div class="row"><b>전기세</b>${man(r.tokens)}${r.top ? ` · 제일 많이 쓴 자리: ${esc(r.top)}` : ''}</div>
+      <ul>${r.units.map((u) => `<li><b>${esc(u.key)}</b>${u.people > 1 ? ` (${u.people}명)` : ''} — ${u.mins}분 · 서류 ${u.papers}장${u.fails ? ` · 실패 ${u.fails}번` : ''}${u.tokens ? ` · ${man(u.tokens)}` : ''}</li>`).join('')}</ul>
+      <div class="note">▶ 다시 보기: Claude Code 옆 패널에서 「📋 보고서 · ▶ 다시 보기」 를 누르면 방금 일이 4배 빠르게 다시 돌아요 — 이 화면에도 같이 보여요 (토큰 0).</div>`;
+  }
+  // 👥 명부: 내가 만든 에이전트 (.claude/agents)
+  function rosterCard() {
+    const list = snap.roster || [];
+    const rows = list.map((a, i) => `<div class="srow" style="--i:${i}"><div class="sname"><b>${esc(a.name)}</b><span class="star" style="color:#8a7f74">${esc(a.where)}</span></div><div class="snote">${esc(a.description)}</div>
+      <button class="more" style="margin-top:6px" data-copy="${esc(a.name)} 에이전트에게 맡겨 줘: ">📋 맡기기 문장 복사</button></div>`).join('');
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>👥 명부</h2><div class="kind">내가 만든 에이전트 ${list.length}명 (.claude/agents)</div></div></div>
+      ${rows || '<div class="row">아직 없어요. 프로젝트의 .claude/agents 나 ~/.claude/agents 에 에이전트를 만들면 여기 보여요.</div>'}
+      <div class="note">복사한 문장을 Claude Code 입력창에 붙여 넣고 이어서 쓰면 돼요. 패널의 「명부」 탭에선 누르면 바로 입력창에 들어가요. 이름은 패널에서 직원을 눌러 바꿀 수 있어요.</div>`;
+  }
+
   // 피로도 안내: 단계별로 지금 할 일 (/compact, 또는 기록하고 /clear)
   const NOTE_TEXT = '지금까지 한 일 · 정한 것 · 남은 일을 HANDOFF.md 에 정리해 줘. 다음 대화에서 이 파일부터 읽고 이어 갈 거야.';
   function tiredCard() {
@@ -841,16 +870,26 @@
   }
   const HELP = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>👋 사무실 사용법</h2><div class="kind">처음 오셨나요?</div></div></div>
     <div class="row">여기는 지금 이 프로젝트(= 회사)의 사무실이에요. Claude 에게 일을 시키면 직원들이 출근해서 일하는 모습이 보여요.</div>
-    <div class="row"><b>팀장</b>지금 대화하는 Claude. 일을 나누면 기획자 · 디자이너 · 개발자 · QA · 리서처가 문으로 출근해요. 팀이면 「QA 1팀」 처럼 한 자리.</div>
+    <div class="row"><b>팀장</b>지금 대화하는 Claude. 일을 나누면 직원이 문으로 출근해요 — 기본은 기획자 · 디자이너 · 개발자 · QA · 리서처, 내가 만든 에이전트는 그 이름 그대로. 팀이면 「QA 1팀」 처럼 한 자리.</div>
     <div class="row"><b>직원을 누르면</b>오른쪽에 「지금 화면」 — 실행 중인 명령 · 고치는 파일 · 방금 한 일.</div>
     <div class="row"><b>📚 책장</b>내 스킬 목록과 한 줄 설명. 스킬을 쓰면 담당 직원이 책을 꺼내 와 읽어요.</div>
     <div class="row"><b>📋 게시판</b>사무실 소식 최근 3줄, 누르면 10줄.</div>
+    <div class="row"><b>🔔 확인 필요</b>Claude 가 허락 · 질문의 답을 기다리면 맨 위에 노란 줄이 떠요. Claude Code 창으로 가서 답해 주세요.</div>
+    <div class="row"><b>📋 보고서</b>일이 끝나면 맨 위 「이번 일 보고서」. 다시 보기는 패널에서 누르면 여기에도 같이 보여요.</div>
+    <div class="row"><b>👥 명부</b>내가 만든 에이전트 목록. 「맡기기 문장 복사」 → 입력창에 붙여 넣기.</div>
     <div class="row"><b>피로도</b>대화가 얼마나 찼는지. 팀장은 맨 위, 직원은 이름표 밑 작은 막대(직원마다 따로).</div>
     <div class="row"><b>전기세</b>쓴 토큰. 평소보다 많이 쓰면 주황색.</div>
     <div class="note">명령 (Claude Code 에서): <code>/termimates</code> 패널 켜고 끄기 · <code>/termimates 시연</code> 가짜 장면 (토큰 0) · <code>/termimates 웹</code> 이 화면 · <code>/termimates 도움말</code><br>이 화면은 AI 를 부르지 않아요 (토큰 0). 기록은 이 컴퓨터에만.</div>`;
   function card() {
     const el = $('card');
     if (!snap || !snap.office || !sel) { el.hidden = true; lastCardHtml = ''; return; }
+    if (sel === '__report' || sel === '__roster') {
+      const html = sel === '__report' ? reportCard() : rosterCard();
+      if (html !== lastCardHtml) { lastCardHtml = html; $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d');
+        if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get(sel === '__report' ? 'lead' : 'planner', { pose: sel === '__report' ? 'thumb' : 'idle', expr: 'happy' }), 0, 0); } }
+      el.hidden = false; return;
+    }
     if (sel === '__tired') {
       const html = tiredCard();
       if (html !== lastCardHtml) { lastCardHtml = html; $('cardBody').innerHTML = html;
@@ -979,11 +1018,18 @@
   });
   canvas.addEventListener('mousemove', (ev) => { const h = hitAt(ev); if ((h && h.key) !== hover) { hover = h && h.key; canvas.classList.toggle('hand', !!h); } });
   $('close').addEventListener('click', () => { sel = null; card(); refit(); });
+  const open = (k) => () => { const was = !!sel; sel = sel === k ? null : k; card(); if (was !== !!sel) refit(); };
+  $('report').addEventListener('click', open('__report'));
+  $('roster').addEventListener('click', open('__roster'));
   $('help').addEventListener('click', () => { const was = !!sel; sel = sel === '__help' ? null : '__help'; card(); if (was !== !!sel) refit(); });
   $('cardBody').addEventListener('click', (ev) => {
     const d = ev.target && ev.target.dataset;
     if (d && d.more) { shelfMore = true; card(); }
-    if (d && d.copy && navigator.clipboard) navigator.clipboard.writeText(d.copy).then(() => { ev.target.textContent = '✓ 복사했어요 — Claude Code 입력창에 붙여 넣으세요'; });
+    const c = ev.target && ev.target.closest && ev.target.closest('[data-copy]');
+    if (c && navigator.clipboard) navigator.clipboard.writeText(c.dataset.copy).then(() => {
+      if (c.tagName === 'BUTTON') c.textContent = '✓ 복사했어요 — Claude Code 입력창에 붙여 넣으세요';
+      else { c.style.outline = '2px solid #2f9e44'; setTimeout(() => { c.style.outline = ''; }, 900); }
+    });
   });
   $('fatigue').addEventListener('click', () => { const was = !!sel; sel = sel === '__tired' ? null : '__tired'; card(); if (was !== !!sel) refit(); });
   window.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && sel) { sel = null; card(); refit(); } });
@@ -1004,7 +1050,8 @@
       if (!L || now !== sig) { sig = now; fit(); try { render(Date.now()); } catch (e) { /* 다음 장면에 */ } } else L = layout(L.W);
     }
     hud();
-    if (sel && sel !== 'main' && sel !== '__shelf' && !(snap.units || []).some((u) => u.key === sel)) sel = null;
+    if (sel && sel !== 'main' && !sel.startsWith('__') && !(snap.units || []).some((u) => u.key === sel)) sel = null; // __ 로 시작 = 책장 · 보고서 · 명부 · 도움말 카드
+    if (sel === '__report' && !snap.report) sel = null;
     if (sel) card();
   }
   function connect() {

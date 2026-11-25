@@ -45,9 +45,11 @@ const units = [
   { key: 'QA 3팀', job: 'QA', worker: 'q31', count: 1, team: true, members: [{ id: 'q31', member: '3-1', status: 'work' }] },
   { key: '디자이너', job: '디자이너', worker: 'd1', count: 1, team: false, members: [{ id: 'd1', status: 'work' }] },
 ]
-const snap = { v: 1, session: 's', project: '/work/app', demo: { step: 3, total: 40 },
+const snap = { v: 1, session: 's', project: '/work/app', demo: { step: 3, total: 40, label: '다시 보기' },
+  report: { at: now, prompt: 'QA 돌려줘', mins: 12, fails: 1, papers: 3, tokens: 730000, top: 'QA 1팀', units: [{ key: 'QA 1팀', people: 2, mins: 9, fails: 1, papers: 2, tokens: 400000 }] },
+  roster: [{ name: 'copywriter', description: '광고 문구를 써요', where: '이 프로젝트' }],
   skills: [{ name: 'qa-checklist', note: 'QA 체크리스트', role: 'QA', source: 'user', count: 2, last: now }, { name: 'vercel:deploy', note: '배포', role: '개발자', source: 'plugin', count: 0, last: 0 }],
-  office: { prompt: 'QA 돌려줘', promptAt: now + 300, lead: W('main', 'main', { status: 'wait_report', tool: undefined, action: '보고 기다리는 중' }), workers,
+  office: { prompt: 'QA 돌려줘', promptAt: now + 300, waiting: { at: now, who: 'main', what: 'Bash 허락해 주세요' }, lead: W('main', 'main', { status: 'wait_report', tool: undefined, action: '보고 기다리는 중' }), workers,
     handoffs: [{ at: now - 2000, from: 'q11', preview: '찾음' }], assigns: [{ at: now - 200, to: 'q12' }], skillUses: {},
     shelf: [{ at: now - 2600, who: 'q31', book: 'qa-checklist' }, { at: now - 6000, who: 'main', book: 'animate' }] },
   power: { job: { input: 1, cacheRead: 2, cacheWrite: 3, output: 4 }, session: { input: 1, cacheRead: 2, cacheWrite: 3, output: 4 }, byWorker: {}, workers: { q12: { tokens: 150000, window: 200000 }, d1: { tokens: 40000, window: 200000 } },
@@ -58,6 +60,7 @@ for (const width of [1400, 900, 600, 380]) {
   api.take({ ...snap, units: units.slice() })
   for (let t = 0; t < 12000; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
 }
+if (!api.select('__report').includes('이번 일 보고서') || !api.select('__roster').includes('copywriter')) { console.error('보고서 · 명부 카드 없음'); process.exit(1) }
 if (!api.select('__tired').includes('피로도')) { console.error('피로도 안내 없음'); process.exit(1) }
 if (!api.select('__help').includes('사용법')) { console.error('도움말 없음'); process.exit(1) }
 if (!api.select('__shelf').includes('qa-checklist')) { console.error('책장 카드에 스킬이 없음'); process.exit(1) }

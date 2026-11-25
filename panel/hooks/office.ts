@@ -4,10 +4,13 @@
 import type { Fill, Office, Power, Tok, Worker } from '../types'
 import { plus, sum } from './power'
 import { skillRole } from './skills'
-import { actionText, clip, doneText, jobOf, memberOf, teamOf, title } from './words'
+import { actionText, clip, doneText, familyOf, jobOf, memberOf, teamOf, title } from './words'
 
 /** 그 직원의 짧은 한글 역할 */
 export const jobOfW = (w: Worker): string => w.job ?? title(w.role)
+
+/** 그 직원의 생김새용 기본 역할 (이름이 뭐든) */
+export const familyOfW = (w: Worker): string => w.family ?? familyOf(w.role, w.task)
 
 /** 사무실 한 자리 = 한 명 또는 한 팀. QA 3팀 × 3명이면 9명이 아니라 팀마다 한 자리(세 자리). 같은 역할 · 같은 팀이면 같은 자리 */
 export const unitOf = (w: Worker): string => (w.team ? `${jobOfW(w)} ${w.team}팀` : jobOfW(w))
@@ -65,6 +68,25 @@ export function onPrompt(o: Office, text: string, now: number): Office {
   }
 }
 
+/** 사장님 확인(허락 · 질문)을 기다리기 시작 — 그 사람이 손을 든다 */
+export function onWait(o: Office, who: string, what: string, now: number, id?: string): Office {
+  const out = withWorker(o, who, now, w => set(w, 'ask', `사장님 확인 기다리는 중: ${clip(what, 40)}`, now))
+  return { ...out, waiting: { at: now, who, what: clip(what, 60), id } }
+}
+
+/** 확인이 끝남 (허락 · 거절 · 답) */
+export function onWaitEnd(o: Office, now: number): Office {
+  if (!o.waiting) return o
+  const who = o.waiting.who
+  const out = withWorker(o, who, now, w => (w.status === 'ask' ? set(w, 'think', '확인 받고 이어서 하는 중', now) : w))
+  return { ...out, waiting: undefined }
+}
+
+/** 이 종류의 에이전트 이름표를 바꿈 (이미 출근한 직원도 바로) */
+export function onRename(o: Office, type: string, name: string): Office {
+  return { ...o, workers: o.workers.map(w => (w.role === type ? { ...w, job: name } : w)) }
+}
+
 /** 팀장이 할 일 목록을 적음 (TodoWrite 는 통째로, TaskCreate 는 한 줄 더하기) — 웹 화이트보드에 보인다 */
 export function onTodos(o: Office, tool: string, input: Record<string, unknown>): Office {
   if (tool === 'TodoWrite' && Array.isArray(input.todos)) {
@@ -92,7 +114,7 @@ export function readerOf(o: Office, who: string, book: string, description?: str
   if (who !== 'main') return who
   const role = skillRole(book, description)
   if (role === '팀장') return 'main'
-  const w = [...o.workers].reverse().find(x => x.ended === undefined && !x.teammate && jobOfW(x) === role)
+  const w = [...o.workers].reverse().find(x => x.ended === undefined && !x.teammate && familyOfW(x) === role)
   return w ? w.id : 'main'
 }
 
@@ -149,7 +171,7 @@ export function onSpawn(o: Office, s: Spawn, now: number): Office {
   const text = `${s.description} ${s.name ?? ''} ${(s.prompt ?? '').slice(0, 300)}`
   const w = log({ ...w0, role: s.type, name: s.name, task: s.description, background: s.background,
     teammate: s.teammate === true, started: had?.started ?? now,
-    job: jobOf(s.type, text), team: teamOf(text), member: memberOf(text) }, now, `출근: ${s.description}`)
+    job: jobOf(s.type, text), family: familyOf(s.type, text), team: teamOf(text), member: memberOf(text) }, now, `출근: ${s.description}`)
   const workers = had ? o.workers.map(x => (x.id === s.id ? w : x)) : [...o.workers, w]
   let lead = o.lead
   if (!s.parentAgentId) {
@@ -188,6 +210,7 @@ export function addUsage(p: Power, id: string, t: Tok, day: string, fill?: Fill)
   return {
     ...p, job: plus(p.job, t), session: plus(p.session, t), byWorker: { ...p.byWorker, [id]: plus(p.byWorker[id], t) },
     day, mine: (p.day === day ? p.mine : 0) + n, today: (p.day === day ? p.today : 0) + n,
+    jobBy: { ...(p.jobBy ?? {}), [id]: plus(p.jobBy?.[id], t) },
     lead: id === 'main' && fill ? fill : p.lead,
     workers: id !== 'main' && fill ? { ...p.workers, [id]: fill } : p.workers,
   }

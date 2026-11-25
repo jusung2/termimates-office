@@ -13,6 +13,10 @@ body { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-col
 .brand b { color: #ffd89b; }
 #project { color: #a89a8a; font-size: 12px; margin-left: 6px; }
 #demo { background: #f0b232; color: #2a1d05; font-weight: 700; font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.wait { background: #f0b232; color: #2a1d05; font-weight: 700; font-size: 12px; padding: 3px 10px; border-radius: 999px; animation: ring 1.2s ease-in-out infinite; }
+@keyframes ring { 50% { background: #ffd466; } }
+#report { margin-left: auto; }
+#report + #roster, #roster + #help { margin-left: 6px; }
 .help { margin-left: auto; border: 1px solid #4a3d33; background: #2f2721; color: #ffd89b; border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
 .help + .conn { margin-left: 8px; }
 #card code { background: #efe4d3; padding: 0 4px; border-radius: 4px; font-size: 11px; }

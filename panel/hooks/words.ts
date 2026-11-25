@@ -26,12 +26,39 @@ const TEXT_ROLES: [RegExp, string][] = [
   [/\bresearch|\bexplor|\bsearch|조사|검색|리서치/i, '리서처'],
 ]
 
+/** 생김새(옷 · 소품)용 기본 역할 다섯 + 팀장. 이름이 뭐든 비슷한 쪽으로 고른다 (안 맞으면 개발자 모습) */
+export function familyOf(type: string, text = ''): string {
+  if (type === 'main') return '팀장'
+  const bare = type.split(':').pop() ?? type
+  if (!GENERIC.test(bare)) {
+    const t = title(type)
+    if (t !== '개발자' || /dev|code|engineer|build|exec|impl/i.test(bare)) return t
+  }
+  for (const [re, name] of TEXT_ROLES) if (re.test(`${bare} ${text}`)) return name
+  return '개발자'
+}
+
+// 이름표: 기본 다섯 역할은 기본일 뿐 — 사람마다 쓰는 에이전트가 다르니 이름은 열려 있다:
+// 1) 사용자가 정한 이름 (패널에서 바꾼 이름 · ~/.termimates/roles.json)
+// 2) 사용자가 직접 만든 에이전트(.claude/agents)는 그 이름 그대로
+// 3) Claude 기본 · 플러그인 에이전트(이름만으론 일을 모름)는 쉬운 역할 (기획자 · 디자이너 · 개발자 · QA · 리서처)
+let NAMES: Record<string, string> = {}
+export function setNames(map: Record<string, string>): void {
+  NAMES = {}
+  for (const [k, v] of Object.entries(map ?? {})) if (typeof v === 'string' && v.trim()) NAMES[k] = v.trim().slice(0, 20)
+}
+export const namesNow = (): Record<string, string> => ({ ...NAMES })
+/** 「general-purpose」 처럼 이름만으론 무슨 일인지 모르는 종류 (이름을 바꾸면 전부 바뀌니까 이름 바꾸기를 안 보임) */
+export const isGeneric = (type: string): boolean => GENERIC.test(type.split(':').pop() ?? type)
+const BUILTIN = /^(general-purpose|claude|fork|default|agent|worker|subagent|task|explore|plan|statusline-setup|claude-code-guide|web-fetch|output-style-setup|)$/i
+
 export function jobOf(type: string, text = ''): string {
   if (type === 'main') return '팀장'
   const bare = type.split(':').pop() ?? type
-  if (!GENERIC.test(bare)) return title(type)
-  for (const [re, name] of TEXT_ROLES) if (re.test(text)) return name
-  return '개발자'
+  const own = NAMES[type] ?? NAMES[bare]
+  if (own) return own
+  if (!type.includes(':') && !BUILTIN.test(bare)) return bare // 내가 만든 에이전트: 이름 그대로
+  return familyOf(type, text)
 }
 
 /** 팀 번호: 「1팀」 「team 2」 「팀3」, 없으면 팀원 번호 「1-2」 의 앞 숫자 (날짜 같은 큰 숫자는 빼고) */

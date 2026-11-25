@@ -5,18 +5,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 
-import type { Fill, Office, Power, View } from '../types'
+import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
 import { HOLD, IDLE_DEMO, QA_STEPS, startDemo, STEPS } from './demo'
 import {
-  addUsage, EMPTY, jobOfW, log, onComplete, onPrompt, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart, onTurnStart, readerOf,
+  addUsage, EMPTY, familyOfW, jobOfW, log, onComplete, onPrompt, onRename, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart,
+  onTurnStart, onWait, onWaitEnd, readerOf,
   running, set, toShelf, unitOf,
 } from './office'
 import {
   adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
 } from './power'
 import { CW, draw, encode, isGone, isMoving, layout, seatsOf, TAG_ROW } from './scene'
+import { reportOf, stepsFromLog } from './replay'
 import { setLocalNotes, skillNote, skillRole } from './skills'
-import { ago, bubbles, clip, hhmm, targetOf, title } from './words'
+import { ago, bubbles, clip, hhmm, isGeneric, namesNow, setNames, targetOf, title } from './words'
 
 const PANE = 'office'
 const TITLE = '사무실'
@@ -27,6 +29,7 @@ const view = atom({ plugin: 'termimates', key: 'view' } as const, { tab: 'office
 })
 const power = atom({ plugin: 'termimates', key: 'power' } as const, EMPTY_POWER, { shape: 'power-1' })
 const demo = atom({ plugin: 'termimates', key: 'demo' } as const, IDLE_DEMO, { shape: 'demo-1' })
+const replay = atom({ plugin: 'termimates', key: 'replay' } as const, { from: 0, log: [] } as Replay, { shape: 'replay-1' })
 
 // -- 화면 도우미 ----------------------------------------------------------------
 
@@ -175,7 +178,7 @@ async function closeJob($: EngineInterface) {
   } catch {
     // 기록 실패는 조용히 넘긴다
   }
-  await changePower($, p => ({ ...p, job: ZERO, jobUsual: jobUsual ?? p.jobUsual }))
+  await changePower($, p => ({ ...p, job: ZERO, jobBy: {}, jobUsual: jobUsual ?? p.jobUsual }))
 }
 
 /** 세션 시작(또는 다시 불러옴): 오늘 합계 · 평소 · 팀장 피로도를 읽어 둔다. 쌓인 숫자는 지우지 않는다. */
@@ -343,12 +346,14 @@ async function writeSnap($: EngineInterface) {
     const o = dm.running ? dm.office : await read($, office)
     const pw = dm.running ? dm.power : await read($, power)
     const units = seatsOf(o, unitOf).map(u => ({
-      key: u.role, job: jobOfW(u.worker), worker: u.worker.id, count: u.count, team: u.list.some(w => w.team),
+      key: u.role, job: jobOfW(u.worker), family: familyOfW(u.worker), worker: u.worker.id, count: u.count, team: u.list.some(w => w.team),
       members: u.list.map(w => ({ id: w.id, member: w.member, status: w.status })),
     }))
     const skills = await shelfItems($, o)
+    const rp = await read($, replay)
     const body = JSON.stringify({
-      v: 1, session: sid, project, demo: dm.running ? { step: dm.step, total: dm.total } : null, office: o, power: pw, units, skills,
+      v: 1, session: sid, project, demo: dm.running ? { step: dm.step, total: dm.total, label: dm.label } : null, office: o, power: pw, units, skills,
+      report: dm.running ? null : rp.report ?? null, roster: roster?.list ?? [],
     })
     const now = Date.now()
     if (body === lastSnap && now - lastSnapAt < 5000) return
@@ -368,15 +373,95 @@ async function startWeb($: EngineInterface) {
   await writeSnap($)
 }
 
+/** 사장님 확인 기다림 시작 → 12초 넘게 그대로면 맥 알림 한 번 (다른 창에서 일하다 놓치지 않게) */
+async function waitFor($: EngineInterface, who: string, what: string, id?: string) {
+  await change($, (o, now) => onWait(o, who, what, now, id))
+  const at = (await read($, office)).waiting?.at
+  void (async () => {
+    await $.clock.sleep(12000)
+    const o = await read($, office)
+    if (o.waiting && o.waiting.at === at) {
+      await $.ui.notify(`사장님 확인이 필요해요 — ${o.waiting.what}`, { title: 'TermiMates', key: 'wait' }).catch(() => undefined)
+    }
+  })().catch(() => undefined)
+}
+
+// -- 다시 보기 · 보고서: 이번 일에서 일어난 일을 적어 둔다 (토큰 0, 이 세션 안에서만) ----------------------
+// 일하는 동안은 메모리에만 적고(그릴 때마다 상태를 안 건드림), 일이 끝날 때 보고서와 함께 한 번 저장한다.
+let jobLog: { from: number; log: LogEntry[] } = { from: 0, log: [] }
+async function rec($: EngineInterface, k: string, a: unknown[]) {
+  try {
+    const t = await $.clock.now()
+    jobLog.log.push({ t, k, a })
+    if (jobLog.log.length > 600) jobLog.log.splice(0, jobLog.log.length - 600)
+  } catch {
+    // 못 적어도 그대로
+  }
+}
+
+/** 입력창에 글만 넣는다 (보내기는 사람이 Enter → 그 전엔 토큰 0) */
+async function fillPrompt($: EngineInterface, text: string) {
+  try {
+    const r = await $.prompt.fill({ text })
+    $.ui.toast(r.isFilled ? '입력창에 넣었어요. 확인하고 Enter 를 누르세요' : '입력창에 못 넣었어요')
+  } catch {
+    $.ui.toast('입력창에 못 넣었어요')
+  }
+}
+
+// -- 이름표: 사용자가 정한 이름 (패널에서 바꾼 것 + ~/.termimates/roles.json) --------------------------
+async function loadNames($: EngineInterface) {
+  let file: Record<string, string> = {}
+  try {
+    const raw = JSON.parse(String(await $.fs.read(`${await homeOf($)}/.termimates/roles.json`))) as unknown
+    if (raw && typeof raw === 'object') file = raw as Record<string, string>
+  } catch {
+    // 없으면 그만
+  }
+  const saved = ((await $.store.get('names').catch(() => undefined)) ?? {}) as Record<string, string>
+  setNames({ ...file, ...saved })
+}
+
+async function rename($: EngineInterface, type: string, name: string) {
+  const saved = { ...(((await $.store.get('names').catch(() => undefined)) ?? {}) as Record<string, string>), [type]: name }
+  await $.store.set('names', saved).catch(() => undefined)
+  setNames({ ...namesNow(), [type]: name })
+  await update($, office, o => onRename(o ?? EMPTY, type, name)).catch(() => undefined)
+}
+
+// -- 명부: 내가 만든 에이전트 (.claude/agents) — 누르면 「맡기기」 문장이 입력창에 -----------------------
+export type RosterItem = { name: string; description: string; where: string }
+let roster: { at: number; list: RosterItem[] } | undefined
+async function loadRoster($: EngineInterface): Promise<RosterItem[]> {
+  if (roster && Date.now() - roster.at < 60000) return roster.list
+  const list: RosterItem[] = []
+  const dirs: [string, string][] = [[`${project}/.claude/agents`, '이 프로젝트']]
+  try { dirs.push([`${await homeOf($)}/.claude/agents`, '내 컴퓨터']) } catch { /* HOME 못 앎 */ }
+  for (const [dir, where] of dirs) {
+    const entries = await $.fs.list(dir).catch(() => [])
+    for (const e of entries) {
+      if (e.kind !== 'file' || !e.name.endsWith('.md')) continue
+      const text = String(await $.fs.read(`${dir}/${e.name}`, { length: 3000 }).catch(() => ''))
+      const head = /^---\s*\n([\s\S]*?)\n---/.exec(text)?.[1] ?? ''
+      const pick = (k: string) => (new RegExp(`^${k}:\\s*["']?(.+?)["']?\\s*$`, 'm').exec(head)?.[1] ?? '').trim()
+      const name = pick('name') || e.name.replace(/\.md$/, '')
+      if (list.some(x => x.name === name)) continue
+      list.push({ name, description: skillNote(name, pick('description')), where })
+    }
+  }
+  roster = { at: Date.now(), list }
+  return list
+}
+
 // -- 시연 (가짜 장면, 토큰 0) -----------------------------------------------------
 const DEMO_WORDS = new Set(['시연', '예시', 'demo'])
 let demoRun = 0 // 몇 번째 시연인지: 멈추거나 다시 시작하면 앞 시연은 그 자리에서 그친다
 
-async function runDemo($: EngineInterface, steps = STEPS) {
+async function runDemo($: EngineInterface, steps = STEPS, pw?: Power, label?: string) {
   const my = ++demoRun
   try {
     const t0 = await $.clock.now()
-    await update($, demo, () => startDemo(t0, steps.length))
+    await update($, demo, () => startDemo(t0, steps.length, pw, label))
     for (const [i, s] of steps.entries()) {
       await $.clock.sleep(s.wait)
       if (my !== demoRun) return
@@ -417,7 +502,7 @@ async function animate($: EngineInterface) {
     const now = await $.clock.now()
     if (!isMoving(o, now) && now - lastBlit < 340) return
     lastBlit = now
-    const L = layout(o, lastWidth, unitOf, jobOfW)
+    const L = layout(o, lastWidth, unitOf, familyOfW)
     await $.ui.blit({ requestId: PANE, key: 'scene', cells: encode(draw(o, L, now, new Date(now).getHours(), fillsOf(o, pw)), L.cols, L.rows) })
   } catch {
     // 닫혀 있거나 크기가 바뀌는 중
@@ -440,7 +525,9 @@ export const register: Register = on => {
       })
       await startPower($)
       void loadLocalNotes($)
+      void loadNames($)
       project = e.cwd
+      void loadRoster($).catch(() => undefined)
       // 처음 깐 사람: 딱 한 번 저절로 열고 사용법 안내 카드를 보여 준다
       const welcomed = await $.store.get('welcomed').catch(() => true)
       if (welcomed !== true) {
@@ -515,7 +602,10 @@ export const register: Register = on => {
       if (known) await change($, (o, now) => toShelf(o, readerOf(o, 'main', cmd, known.description), cmd, now))
     }
     if (!e.isMeta && !e.command) {
-      await change($, (o, now) => onPrompt(o, e.text, now))
+      await change($, (o, now) => onWaitEnd(onPrompt(o, e.text, now), now))
+      const t = await $.clock.now()
+      jobLog = { from: t, log: [{ t, k: 'prompt', a: [clip(e.text, 60)] }] }
+      await update($, replay, () => ({ from: t, log: [] })).catch(() => undefined) // 지난 보고서는 내림
     }
     return ran
   }).catch(($, e, next) => next(e))
@@ -532,22 +622,72 @@ export const register: Register = on => {
     const target = targetOf(raw)
     const sub = typeof raw.subagent_type === 'string' ? raw.subagent_type : undefined
     const who = e.agentId ?? 'main'
+    const todoRaw = who === 'main' && (tool === 'TodoWrite' || tool === 'TaskCreate') ? { todos: raw.todos, subject: raw.subject } : undefined
     await change($, (o, now) => onToolStart(who === 'main' ? onTodos(o, tool, raw) : o, who, tool, target, sub, now))
+    void rec($, 'start', [who, tool, target, sub, todoRaw])
+    // 질문(AskUserQuestion)은 사장님 답을 기다리는 것 → 손 들기 + 알림
+    if (tool === 'AskUserQuestion') await waitFor($, who, '질문에 답해 주세요')
     const ran = await next(e)
     const failed = ran.deny === undefined && ran.isError === true
     const errText = failed ? String((ran as { text?: string }).text ?? '실패') : undefined
-    await change($, (o, now) => onToolEnd(o, who, tool, target, sub, failed, errText, now))
+    await change($, (o, now) => onToolEnd(o.waiting?.who === who ? onWaitEnd(o, now) : o, who, tool, target, sub, failed, errText, now))
+    void rec($, 'end', [who, tool, target, sub, failed, errText ? clip(errText, 120) : undefined])
     return ran
+  }).catch(($, e, next) => next(e))
+
+  // 허락 창이 뜨면 사장님 호출: 손 들기 · 맨 위 알림 · 12초 넘으면 맥 알림.
+  // 사람이 답하는 실제 호출만 (approver = person). 자동 모드 판정기가 정하는 건 사람을 안 부르니 1.5초 기다려 본다.
+  // 허락되면 tool.run 에서 바로 내린다 (도구가 오래 돌아도 「확인 필요」 가 남지 않게).
+  const asks = new Map<string, { who: string; what: string }>()
+  const askText = (tool: string, input: unknown) => {
+    if (tool === 'AskUserQuestion') return '질문에 답해 주세요'
+    if (tool === 'ExitPlanMode') return '계획을 보고 허락해 주세요'
+    const t = targetOf((input ?? {}) as Record<string, unknown>)
+    return `${tool}${t ? ` · ${clip(t, 40)}` : ''} 허락해 주세요`
+  }
+  on('tool.check', async ($, e, next) => {
+    const ran = await next(e)
+    const id = e.tool_use_id
+    if (ran.decision === 'ask' && id && e.approver === 'person' && !e.op && e.tool !== 'AskUserQuestion') {
+      asks.set(id, { who: e.agentId ?? 'main', what: askText(e.tool, e.input) })
+      void (async () => {
+        await $.clock.sleep(1500)
+        const a = asks.get(id)
+        if (a) await waitFor($, a.who, a.what, id)
+      })().catch(() => undefined)
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 자동 모드 판정기가 맡음 → 사람을 안 부른다. 판정기가 못 정하면(ask) 그때 사람에게
+  on('tool.judge', async ($, e, next) => {
+    const a = asks.get(e.tool_use_id)
+    asks.delete(e.tool_use_id)
+    const ran = await next(e)
+    if (a && ran.decision === 'ask') await waitFor($, a.who, a.what, e.tool_use_id).catch(() => undefined)
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  // 허락됨 → 바로 손 내림
+  on('tool.run', async ($, e, next) => {
+    const id = (e as { tool_use_id?: string }).tool_use_id
+    if (id) asks.delete(id)
+    const who = e.agentId ?? 'main'
+    const w = (await read($, office)).waiting
+    if (w && (w.id === id || w.who === who)) await change($, (o, now) => onWaitEnd(o, now))
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || !ran.agentId) return ran
     const id = ran.agentId
-    await change($, (o, now) => onSpawn(o, {
+    const spawn = {
       id, type: e.subagentType, name: e.name, description: e.description, background: e.background,
-      teammate: e.isTeammate === true, parentAgentId: e.parentAgentId, prompt: e.prompt,
-    }, now))
+      teammate: e.isTeammate === true, parentAgentId: e.parentAgentId, prompt: (e.prompt ?? '').slice(0, 300),
+    }
+    await change($, (o, now) => onSpawn(o, spawn, now))
+    void rec($, 'spawn', [spawn])
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -555,7 +695,22 @@ export const register: Register = on => {
     const ran = await next(e)
     const id = e.agentId
     await count($, id, e.usage)
-    await change($, (o, now) => onComplete(o, id, e.answer, e.isAborted, now))
+    await change($, (o, now) => onComplete(id ? o : onWaitEnd(o, now), id, e.answer, e.isAborted, now))
+    await rec($, 'done', [id, clip(e.answer, 200), e.isAborted])
+    if (!id) {
+      // 팀장이 일을 마치면 이번 일 보고서 (직원이 있었거나 한 일이 몇 개 이상일 때)
+      try {
+        const { from, log } = jobLog
+        if (from && (log.some(x => x.k === 'spawn') || log.length >= 4)) {
+          const o = await read($, office)
+          const now = await $.clock.now()
+          const report = reportOf(o, from, now, await read($, power))
+          await update($, replay, () => ({ from, log: [...log], report }))
+        }
+      } catch {
+        // 보고서는 못 만들어도 그대로
+      }
+    }
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -623,7 +778,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const width = Math.max(CW, e.props.bodyColumns)
     lastWidth = width
-    const pick = (key: string) => () => update($, view, x => ({ ...(x ?? v), selected: key, shelf: false }))
+    const pick = (key: string) => () => update($, view, x => ({ ...(x ?? v), selected: key, shelf: false, report: false, guide: false, tired: false }))
     const toggleShelf = () => update($, view, x => ({ ...(x ?? v), shelf: !(x ?? v).shelf }))
     const items = v.tab === 'library' || v.shelf ? await shelfItems($, o) : []
     // 책장 목록: 내 스킬(내가 만든 것) → 플러그인 스킬(플러그인별로 묶어 접어 둠). 줄마다 이름 + 한 줄 설명
@@ -634,16 +789,18 @@ export const register: Register = on => {
       const more = all || v.shelfMore
       const row = (i: ShelfItem, k: string) => (
         <Box key={k + i.name} flexDirection="column">
-          <Text>
+          <Box>
             <Text bold color="suggestion">{'▌' + i.name}</Text>
-            {i.count ? <Text color="warning">{` ★ 이번 세션 ${i.count}번`}</Text> : ''}
-          </Text>
+            {i.count ? <Text color="warning">{` ★ 이번 세션 ${i.count}번`}</Text> : null}
+            <Text>  </Text>
+            <Button key={'use-' + i.name} plain onPress={() => fillPrompt($, `/${i.name} `)}><Text dimColor underline>쓰기 ▸</Text></Button>
+          </Box>
           <Text dimColor>{'  ' + i.note}</Text>
         </Box>
       )
       return (
         <Box key="shelf-list" flexDirection="column" borderStyle="round" paddingX={1}>
-          <Text bold>📚 책장<Text dimColor>{all ? '' : '  (책장을 다시 누르면 접혀요)'}</Text></Text>
+          <Text bold>📚 책장<Text dimColor>{all ? '  「쓰기」 를 누르면 입력창에 /스킬 이 들어가요 (Enter 는 직접)' : '  (책장을 다시 누르면 접혀요 · 「쓰기」 = 입력창에 넣기)'}</Text></Text>
           <Text key="h-mine" bold color="warning">{`내 스킬 ${mine.length}개`}<Text dimColor> — 내가 만들어 둔 것 (~/.claude/skills · commands, 이 프로젝트 .claude)</Text></Text>
           {mine.length ? mine.map(i => row(i, 'm-')) : <Text dimColor>  아직 없어요</Text>}
           <Text key="h-plug" bold>{`플러그인 스킬 ${plug.length}개`}<Text dimColor> — 설치한 플러그인에 딸려 온 것</Text></Text>
@@ -669,6 +826,9 @@ export const register: Register = on => {
       `팀장: ${o.lead.action}`,
       r.length ? `일하는 자리 ${[...new Set(r.map(unitOf))].join(', ')}` : '',
       done.length ? `보고 완료 ${done.length}건` : '',
+      // 오래 같은 일에 머무는 직원 (5분 넘게)
+      ...r.filter(w => (w.status === 'work' || w.status === 'think') && now - w.since > 5 * 60000)
+        .map(w => `⏳ ${unitOf(w)} ${Math.floor((now - w.since) / 60000)}분째 같은 일`),
     ].filter(Boolean).join(' · ')
 
     const tabs = (
@@ -679,6 +839,10 @@ export const register: Register = on => {
         <Text>  </Text>
         <Button key="tab-library" plain onPress={tab('library')}>
           <Text bold={v.tab === 'library'} dimColor={v.tab !== 'library'}>{v.tab === 'library' ? '▣' : '□'} 도서관</Text>
+        </Button>
+        <Text>  </Text>
+        <Button key="tab-roster" plain onPress={tab('roster')}>
+          <Text bold={v.tab === 'roster'} dimColor={v.tab !== 'roster'}>{v.tab === 'roster' ? '▣' : '□'} 명부</Text>
         </Button>
         <Text>  </Text>
         <Button key="tab-help" plain onPress={() => update($, view, x => ({ ...(x ?? v), tab: 'office' as const, guide: !(x ?? v).guide, shelf: false }))}>
@@ -692,6 +856,32 @@ export const register: Register = on => {
         <Box flexDirection="column">
           {tabs}
           {shelfList(true)}
+        </Box>
+      )
+    }
+    if (v.tab === 'roster') {
+      // 명부: 내가 만든 에이전트. 「맡기기」 = 입력창에 부탁 문장 (Enter 는 직접 → 그 전엔 토큰 0)
+      const list = await loadRoster($)
+      return (
+        <Box flexDirection="column">
+          {tabs}
+          <Box key="roster" flexDirection="column" borderStyle="round" paddingX={1}>
+            <Text bold>👥 명부<Text dimColor>{`  내가 만든 에이전트 ${list.length}명 (.claude/agents) · 「맡기기」 를 누르면 입력창에 부탁 문장이 들어가요`}</Text></Text>
+            {list.length ? list.map(a => (
+              <Box key={'r-' + a.name} flexDirection="column">
+                <Box>
+                  <Text bold color="suggestion">{'▌' + (namesNow()[a.name] ?? a.name)}</Text>
+                  <Text dimColor>{`  ${a.where}${namesNow()[a.name] ? ` · ${a.name}` : ''}`}</Text>
+                  <Text>  </Text>
+                  <Button key={'hire-' + a.name} plain onPress={() => fillPrompt($, `${a.name} 에이전트에게 맡겨 줘: `)}>
+                    <Text dimColor underline>맡기기 ▸</Text>
+                  </Button>
+                </Box>
+                <Text dimColor>{'  ' + a.description}</Text>
+              </Box>
+            )) : <Text dimColor>아직 없어요. 프로젝트의 .claude/agents 나 ~/.claude/agents 에 에이전트를 만들면 여기 보여요.</Text>}
+            <Text dimColor>이름은 사무실에서 그 직원을 눌러 바꿀 수 있어요 (또는 ~/.termimates/roles.json).</Text>
+          </Box>
         </Box>
       )
     }
@@ -737,7 +927,42 @@ export const register: Register = on => {
     const tired = leadPct !== undefined && leadPct >= 70
       ? <Text key="tired" color={st?.color}>팀장이 많이 피곤해요. 피로도를 누르면 정리하는 법이 나와요.</Text>
       : null
-    const toggleTired = () => update($, view, x => ({ ...(x ?? v), tired: !(x ?? v).tired, guide: false, shelf: false }))
+    const toggleTired = () => update($, view, x => ({ ...(x ?? v), tired: !(x ?? v).tired, guide: false, shelf: false, report: false }))
+
+    // 🔔 사장님 확인 기다림 (허락 · 질문)
+    const waitRow = o.waiting ? (
+      <Text key="wait" bold inverse color="warning">{` 🔔 사장님 확인 필요 — ${o.waiting.what} · ${ago(now - o.waiting.at)}째 `}</Text>
+    ) : null
+    // 🎬 이번 일 보고서 + 다시 보기
+    const rp = live ? await read($, replay) : undefined
+    const rep = rp?.report
+    const toggleReport = () => update($, view, x => ({ ...(x ?? v), report: !(x ?? v).report, guide: false, shelf: false, tired: false }))
+    const reportLine = rep && !v.report && o.lead.status !== 'think' && o.lead.status !== 'work' ? (
+      <Box key="report-line">
+        <Text color="success">✅ 이번 일 끝 · </Text>
+        <Button key="report" plain onPress={toggleReport}><Text bold underline color="success">📋 보고서 · ▶ 다시 보기</Text></Button>
+      </Box>
+    ) : null
+    const replayNow = async () => {
+      const log = (await read($, replay)).log
+      await update($, view, x => ({ ...(x ?? v), report: false }))
+      if (!log.length) return $.ui.toast('다시 볼 기록이 없어요')
+      void runDemo($, stepsFromLog(log), await read($, power), '다시 보기')
+    }
+    const reportCard = v.report && rep ? (
+      <Box key="report-card" flexDirection="column" borderStyle="round" borderColor="success" paddingX={1}>
+        <Text bold color="success">{`📋 이번 일 보고서 — 「${clip(rep.prompt, 40)}」`}</Text>
+        <Text>{`걸린 시간 ${rep.mins}분 · 자리 ${rep.units.length}개 (직원 ${rep.units.reduce((n, u) => n + u.people, 0)}명) · 서류 ${rep.papers}장 · 실패 ${rep.fails}번`}</Text>
+        <Text color={LED.num}>{`전기세 ${man(rep.tokens)}${rep.top ? ` · 제일 많이 쓴 자리: ${rep.top}` : ''}`}</Text>
+        {rep.units.map(u => (
+          <Text key={'ru-' + u.key} dimColor>{`  · ${u.key}${u.people > 1 ? ` (${u.people}명)` : ''} — ${u.mins}분 · 서류 ${u.papers}장${u.fails ? ` · 실패 ${u.fails}번` : ''}${u.tokens ? ` · ${man(u.tokens)}` : ''}`}</Text>
+        ))}
+        <Box key="report-actions" columnGap={2} marginTop={1}>
+          <Button key="replay" onPress={replayNow}>▶ 다시 보기 (4배 빠르게)</Button>
+          <Button key="report-close" onPress={toggleReport}>닫기</Button>
+        </Box>
+      </Box>
+    ) : null
     // 피로도 안내 카드: 단계별 할 일 + 입력창에 글만 넣어 주는 단추 (Enter 는 사람이 누름 → 누르기 전엔 토큰 0)
     const advice = adviceOf(leadPct)
     const fill = (text: string) => async () => {
@@ -764,7 +989,7 @@ export const register: Register = on => {
       </Box>
     ) : null
 
-    const L = layout(o, width, unitOf, jobOfW)
+    const L = layout(o, width, unitOf, familyOfW)
     const staff = seatsOf(o, unitOf)
     const sel = v.selected === 'main' || staff.some(s => s.role === v.selected) ? v.selected : 'main'
 
@@ -836,7 +1061,9 @@ export const register: Register = on => {
     // (팀장은 그 줄에 혼자라 줄 전체를 쓴다.) 그래도 좁으면 짧은 말로 바꾼다.
     const away = new Set(L.seats.filter(s => isGone(o, L, s.key, now)).map(s => s.key)) // 퇴근한 자리
     const sayOf = (s: (typeof L.seats)[number]) =>
-      s.worker && s.worker.status !== 'desk' && !away.has(s.key) ? bubbles(s.worker.status, s.worker.tool, s.worker.target) : []
+      !s.worker || s.worker.status === 'desk' || away.has(s.key) ? []
+        : o.waiting && s.worker.status === 'ask' && o.waiting.who === s.worker.id ? ['확인해 주세요!', '확인 필요'] // 🔔 사장님 확인 기다림
+          : bubbles(s.worker.status, s.worker.tool, s.worker.target)
     const spots = new Map<string, { left: number; text: string }>()
     const byRow = new Map<number, (typeof L.seats)[number][]>()
     for (const s of L.seats) byRow.set(s.row, [...(byRow.get(s.row) ?? []), s])
@@ -889,6 +1116,21 @@ export const register: Register = on => {
             }
           }} />
       </Box>
+    ) : null
+
+    // ✏️ 이름 바꾸기: 이 종류의 에이전트를 앞으로 이 이름으로 (general-purpose 처럼 이름으로 일을 모르는 종류는 빼고)
+    const selW = mine.find(w => w.ended === undefined) ?? mine[0]
+    const renameBox = live && selW && !isGeneric(selW.role) ? (
+      <Input key={'rename-' + selW.role + '-' + (v.talks ?? 0)} label={`이름 바꾸기 (${selW.role}): `} submitLabel="바꾸기"
+        placeholder={`지금 「${sel}」 — 새 이름 쓰고 Enter`}
+        onSubmit={async value => {
+          const name = value.trim().slice(0, 20)
+          if (!name) return
+          await rename($, selW.role, name)
+          const key = selW.team ? `${name} ${selW.team}팀` : name
+          await update($, view, x => ({ ...(x ?? v), selected: key, talks: ((x ?? v).talks ?? 0) + 1 }))
+          $.ui.toast(`앞으로 「${name}」 으로 불러요`)
+        }} />
     ) : null
 
     let scene: JSX.Element
@@ -946,8 +1188,8 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {tabs}
         {live ? null : rowOf(T, 'demo', width, [
-          [`▶ 시연 중 ${dm.step}/${dm.total}`, { bold: true, color: 'warning' }],
-          [' · 가짜 장면이라 Claude 를 부르지 않아요 (토큰 0)', { color: 'warning' }],
+          [`▶ ${dm.label ?? '시연'} 중 ${dm.step}/${dm.total}`, { bold: true, color: 'warning' }],
+          [dm.label ? ' · 방금 일을 빠르게 다시 보는 중 (토큰 0)' : ' · 가짜 장면이라 Claude 를 부르지 않아요 (토큰 0)', { color: 'warning' }],
           [' · 멈추기: /termimates 시연', { dimColor: true }],
         ])}
         <Box key="fatigue-line">
@@ -960,6 +1202,8 @@ export const register: Register = on => {
         {powerRow}
         {jobRow}
         {tired}
+        {waitRow}
+        {reportLine}
         <Text bold>{o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음'}</Text>
         <Text dimColor>{situation}</Text>
         {scene}
@@ -968,9 +1212,10 @@ export const register: Register = on => {
             <Text bold color="suggestion">👋 처음 오셨나요? TermiMates 사무실 사용법</Text>
             <Text>여기는 지금 이 프로젝트(= 회사)의 사무실이에요. Claude 에게 일을 시키면 직원들이 출근해서 일하는 모습이 보여요.</Text>
             <Text> </Text>
-            <Text><Text bold>팀장</Text> = 지금 대화하는 Claude. 일을 나누면 기획자 · 디자이너 · 개발자 · QA · 리서처가 문으로 출근해요 (팀이면 「QA 1팀」 한 자리).</Text>
-            <Text><Text bold>직원을 누르면</Text> 지금 하는 일 · 넘긴 서류 · 피로도 · 전기세가 보이고, 아래 칸에 말을 걸 수 있어요 (보낼 때만 토큰).</Text>
-            <Text><Text bold>📚 책장</Text>을 누르면 내 스킬 목록과 한 줄 설명. 스킬을 쓰면 담당 직원이 책을 꺼내 와 읽어요.</Text>
+            <Text><Text bold>팀장</Text> = 지금 대화하는 Claude. 일을 나누면 직원이 문으로 출근해요 — 기본은 기획자 · 디자이너 · 개발자 · QA · 리서처, 내가 만든 에이전트는 그 이름 그대로 (팀이면 「QA 1팀」 한 자리).</Text>
+            <Text><Text bold>직원을 누르면</Text> 지금 하는 일 · 넘긴 서류 · 피로도 · 전기세가 보이고, 아래 칸에 말을 걸거나 이름을 바꿀 수 있어요 (말은 보낼 때만 토큰).</Text>
+            <Text><Text bold>📚 책장</Text>을 누르면 내 스킬 목록 — 「쓰기」 를 누르면 입력창에 /스킬 이 들어가요. <Text bold>명부</Text> 탭은 내가 만든 에이전트와 「맡기기」.</Text>
+            <Text><Text bold>🔔</Text> 허락 · 질문을 기다리면 맨 위에 노란 줄 (12초 넘으면 알림). 일이 끝나면 <Text bold>📋 보고서 · ▶ 다시 보기</Text>.</Text>
             <Text><Text bold>맨 위</Text> 피로도 = 대화가 얼마나 찼는지 (70% 넘으면 새 세션 권함) · 전기세 = 쓴 토큰.</Text>
             <Text> </Text>
             <Text bold>명령</Text>
@@ -990,10 +1235,12 @@ export const register: Register = on => {
           </Box>
         ) : null}
         {tiredCard}
+        {reportCard}
         {v.shelf ? shelfList(false) : null}
-        <Box key="card" flexDirection="column" borderStyle="round" paddingX={1} display={v.shelf || v.guide || v.tired ? 'none' : 'flex'}>
+        <Box key="card" flexDirection="column" borderStyle="round" paddingX={1} display={v.shelf || v.guide || v.tired || (v.report && rep) ? 'none' : 'flex'}>
           {detail}
           {talk}
+          {renameBox}
           {agentId ? (
             <Box key="card-actions" columnGap={2}>
               <Button key="open-agent" onPress={async () => {

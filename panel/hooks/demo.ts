@@ -6,8 +6,8 @@ import type { Demo, Fill, Office, Power, Tok } from '../types'
 import { addUsage, EMPTY, onComplete, onPrompt, onSpawn, onStart, onTodos, onToolEnd, onToolStart } from './office'
 import { dayOf, EMPTY_POWER } from './power'
 
-type Run = (d: Demo, now: number) => Demo
-type Step = { wait: number; run: Run }
+export type Run = (d: Demo, now: number) => Demo
+export type Step = { wait: number; run: Run }
 
 const O = (fn: (o: Office, now: number) => Office): Run => (d, now) => ({ ...d, office: fn(d.office, now) })
 const P = (fn: (p: Power) => Power): Run => d => ({ ...d, power: fn(d.power) })
@@ -65,7 +65,7 @@ export const STEPS: Step[] = [
       use(PL, tk(6000, 41000, 5000, 4200), 28000), todos(2)),
   },
   // 두 보고를 받은 팀장이 디자이너에게 시안을 맡긴다
-  { wait: 1600, run: all(use('main', tk(9000, 120000, 7000, 5000), 70000), hire(DS, 'designer', '회원가입 화면 시안')) },
+  { wait: 1600, run: all(use('main', tk(9000, 120000, 7000, 5000), 70000), hire(DS, 'general-purpose', '회원가입 화면 시안 디자인')) },
   // 이번엔 팀장이 「design-polish」 책을 보려는데 담당 디자이너가 있으니 디자이너가 다녀와 읽는다
   { wait: 2800, run: tool('main', 'Skill', 'design-polish') },
   { wait: 900, run: done('main', 'Skill', 'design-polish') },
@@ -158,9 +158,10 @@ export const HOLD = 10000
 export const IDLE_DEMO: Demo = { running: false, office: EMPTY, power: EMPTY_POWER, step: 0, total: 0 }
 
 /** 시연 첫 장면: 팀장 혼자 출근해 있고, 오늘 전기세는 평소의 7할쯤 */
-export function startDemo(now: number, total = STEPS.length): Demo {
+export function startDemo(now: number, total = STEPS.length, power?: Power, label?: string): Demo {
+  if (power) return { running: true, step: 0, total, label, office: onStart(EMPTY, now), power }
   return {
-    running: true, step: 0, total,
+    running: true, step: 0, total, label,
     office: onStart(EMPTY, now),
     power: { ...EMPTY_POWER, day: dayOf(now), today: 2800000, usual: 4000000, jobUsual: 900000, lead: fill(26000) },
   }

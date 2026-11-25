@@ -60,7 +60,7 @@ test('하루 일과: 지시 → 직원 투입 → 일 → 서류 보고, 모든 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /사장님 지시 「로그인 화면 만들어줘」/ }))?.text).toBeTruthy()
-    await ui.press({ key: 'pick-디자이너' })
+    await ui.press({ key: 'pick-designer' })
     expect((await ui.find({ type: 'Text', text: /맡은 일: 로그인 화면 시안/ }))?.text).toBeTruthy()
     expect((await ui.find({ type: 'Text', text: /README\.md」 읽음/ }))?.text).toBeTruthy()
     await ui.press({ key: 'pick-main' })
@@ -70,7 +70,7 @@ test('하루 일과: 지시 → 직원 투입 → 일 → 서류 보고, 모든 
   // 직원이 보고를 마치면: 서류가 팀장에게 가고, 팀장은 받은 서류를 본다
   await $.turn.complete({ turnId: 'x', agentId: 'a-designer', answer: '시안 완료: 주 색 #3B5BDB', durationMs: 900, isAborted: false, reason: 'answer' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'pick-디자이너' })
+  await ui.press({ key: 'pick-designer' })
   expect((await ui.find({ type: 'Text', text: /넘긴 서류: 「시안 완료/ }))?.text).toBeTruthy()
   expect((await ui.find({ type: 'Text', text: /보고 완료/ }))?.text).toBeTruthy()
   await ui.unmount()
@@ -105,7 +105,7 @@ test('말풍선은 자리가 남으면 넓어지고, 좁으면 짧은 말로 바
     $.tool.call({ tool: 'Read', file_path: '/work/demo/very-long-component-name.tsx', agentId: id }))
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts: string[] = []
-  for (const k of ['디자이너', '리서처', '기획자']) texts.push((await ui.find({ key: 'bubble-' + k }))?.text ?? '')
+  for (const k of ['designer', '리서처', '기획자']) texts.push((await ui.find({ key: 'bubble-' + k }))?.text ?? '')
   expect(texts.every(t => t.includes('읽는 중'))).toBe(true)
   for (const t of texts) expect(t.includes('…')).toBe(false) // 잘린 글이 없다
   expect(texts.some(t => t.trim() === '읽는 중')).toBe(true) // 가운데 자리는 짧은 말
