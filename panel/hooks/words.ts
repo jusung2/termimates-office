@@ -74,6 +74,7 @@ const STANDARD: Record<string, string> = {
   critic: 'QA', reviewer: 'QA', 'code-reviewer': 'QA', 'security-reviewer': 'QA', verifier: 'QA', tester: 'QA', 'qa-tester': 'QA', 'test-engineer': 'QA',
   planner: '기획자', architect: '기획자', analyst: '기획자',
   researcher: '리서처', explorer: '리서처', scientist: '리서처', 'document-specialist': '리서처',
+  'git-master': '깃 담당',
 }
 
 /** 이름이 흔한 표준 에이전트 이름과 정확히 같은가 → 그 쉬운 역할 (플러그인 접두사는 떼고 부름) */

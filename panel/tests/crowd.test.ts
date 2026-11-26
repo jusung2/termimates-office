@@ -28,6 +28,7 @@ test('표준 이름(designer · executor)은 플러그인 접두사가 붙어도
   expect(jobOf('oh-my-claudecode:executor')).toBe('개발자')
   expect(jobOf('my-plugin:verifier')).toBe('QA')
   expect(jobOf('copywriter')).toBe('copywriter')
+  expect([jobOf('git-master'), jobOf('oh-my-claudecode:git-master'), jobOf('my-git-master')]).toEqual(['깃 담당', '깃 담당', 'my-git-master']) // 정확히 이 이름만
   // 규칙이 생기기 전에 출근해 job 에 종류 이름 그대로(「designer」) 저장된 직원 (실제 스냅샷: role designer · job designer)
   const old = (role: string, job: string): Worker => ({ id: 'x', role, job, task: '', status: 'idle', action: '', since: 0, started: 0, background: true, recent: [] })
   expect(jobOfW(old('designer', 'designer'))).toBe('디자이너')
