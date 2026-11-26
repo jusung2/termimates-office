@@ -178,14 +178,29 @@ function roleBadge(s: Spawn): Pick<Worker, 'model' | 'tier' | 'persona'> {
   return { model, tier, persona: own?.persona ?? personaOf(`${s.description} ${(s.prompt ?? '').slice(0, 300)}`) }
 }
 
+
+/** 검사 직원이 볼 서류를 만든 직원 짐작: 같은 부모(팀장 또는 같은 직원)가 맡긴 일 중, 검사 직원이 아닌 직원이
+ *  이 검사 직원이 출근하기 직전에 가장 늦게 끝낸 일. 끝난 일이 없으면 모름 (애매하면 안 짐작) */
+export function guessTarget(o: Office, s: Spawn): string | undefined {
+  // 이번 사장님 지시 안에서 일한 직원만 (지난 지시 때 끝난 직원은 이 검사와 상관없음)
+  const from = o.promptAt ?? 0
+  const done = o.workers.filter(w => w.id !== s.id && !w.checker && !w.teammate && w.parent === s.parentAgentId &&
+    w.started >= from && w.ended !== undefined && w.status === 'done')
+  return done.sort((a, b) => (b.ended ?? 0) - (a.ended ?? 0))[0]?.id
+}
+
 /** 직원 입사(일 맡김) */
 export function onSpawn(o: Office, s: Spawn, now: number): Office {
   const had = o.workers.find(w => w.id === s.id)
+  const had = o.workers.find(w => w.id === s.id)
+  const checker = isChecker(s.type, `${s.description} ${s.name ?? ''}`)
   const w0: Worker = had ?? { ...fresh(s.id, s.type, now), status: 'think', action: '일을 받아 시작하는 중' }
   const text = `${s.description} ${s.name ?? ''} ${(s.prompt ?? '').slice(0, 300)}`
   const w = log({ ...w0, role: s.type, name: s.name, task: s.description, background: s.background,
     teammate: s.teammate === true, started: had?.started ?? now,
-    job: jobOf(s.type, text), family: familyOf(s.type, text), team: teamOf(text), member: memberOf(text) }, now, `출근: ${s.description}`)
+    job: jobOf(s.type, text), family: familyOf(s.type, text), team: teamOf(text), member: memberOf(text),
+    parent: s.parentAgentId, checker: checker || undefined, reviewOf: checker ? had?.reviewOf ?? guessTarget(o, s) : undefined,
+    ...roleBadge(s) }, now, `출근: ${s.description}`)
   const workers = had ? o.workers.map(x => (x.id === s.id ? w : x)) : [...o.workers, w]
   let lead = o.lead
   if (!s.parentAgentId) {
@@ -193,6 +208,27 @@ export function onSpawn(o: Office, s: Spawn, now: number): Office {
     if (!s.background) lead = set(lead, 'wait_report', `${unitOf(w)} 보고 기다리는 중`, now)
   }
   return { ...o, workers, lead, assigns: [...o.assigns, { at: now, to: s.id }].slice(-30) }
+}
+
+
+/** 검사 결과 한 줄 (사무실 소식 · 보고서 · 카드에 같이 씀) */
+export function reviewLine(r: Pick<Review, 'unit' | 'verdict' | 'reason' | 'nth'>): string {
+  const what = r.unit ? `${r.unit} 서류` : '서류'
+  if (r.verdict === 'pass') return `검토: ${what} 통과 ✓`
+  if (r.verdict === 'reject') return `검토: ${what} 반려 ✗${r.nth && r.nth > 1 ? ` (${r.nth}번째)` : ''}${r.reason ? ` — ${r.reason}` : ''}`
+  return `검토 끝: ${what}`
+}
+
+/** 검사 직원이 끝남 → 마지막 글에서 통과 / 반려를 뽑아 남긴다. 반려 횟수는 이번 일(사장님 지시 뒤)에서 같은 자리 일을 센다 */
+function addReview(o: Office, w: Worker, answer: string, now: number): { o: Office; line: string } {
+  const target = w.reviewOf ? o.workers.find(x => x.id === w.reviewOf) : undefined
+  const unit = target ? unitOf(target) : undefined
+  const verdict = verdictOf(answer)
+  const from = o.promptAt ?? 0
+  const nth = verdict === 'reject'
+    ? (o.reviews ?? []).filter(r => r.verdict === 'reject' && r.at >= from && r.unit === unit).length + 1 : undefined
+  const r: Review = { at: now, by: w.id, of: target?.id, unit, verdict, reason: verdict === 'reject' ? reasonOf(answer) : undefined, nth }
+  return { o: { ...o, reviews: [...(o.reviews ?? []), r].slice(-20) }, line: reviewLine(r) }
 }
 
 /** 한 차례 끝 (id 없으면 팀장) */
@@ -206,6 +242,10 @@ export function onComplete(o: Office, id: string | undefined, answer: string, ab
       : { ...set({ ...w, handback: paper || w.handback }, aborted ? 'unfinished' : 'done', aborted ? '멈춤' : '보고 완료', now),
         ended: now }
     let out: Office = { ...o, workers: o.workers.map(x => (x.id === id ? log(done, now, '보고 완료') : x)) }
+    if (w.checker && !aborted) {
+      const rv = addReview(out, w, answer, now)
+      out = withWorker(rv.o, id, now, x => log(x, now, rv.line))
+    }
     if (paper) out = { ...out, handoffs: [...out.handoffs, { at: now, from: id, preview: paper }].slice(-30) }
     out = { ...out, lead: log(out.lead, now, `${unitOf(w)}${w.member ? ` ${w.member}` : ''}의 서류 받음`) }
     if (out.lead.status === 'wait_report') out = leadWaitOrRest(out, now, ['think', '직원 보고를 받는 중'])

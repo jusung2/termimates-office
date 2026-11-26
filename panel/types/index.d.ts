@@ -32,6 +32,12 @@ export type Worker = {
   reviewOf?: string // 검사 직원이 보는 서류를 만든 직원 id (출근 직전 같은 부모 아래 막 끝난 직원으로 짐작). 모르면 없음
 }
 
+/** 검사 한 번의 결과 (검사 직원이 끝날 때 마지막 글에서 뽑음). pass 통과 · reject 반려 · done 애매해서 「검토 끝」 */
+export type Review = {
+  at: number; by: string; of?: string; unit?: string // unit: 서류를 만든 자리 이름 (「개발자」)
+  verdict: 'pass' | 'reject' | 'done'; reason?: string; nth?: number // nth: 같은 자리 일이 이번 일에서 몇 번째 반려인지
+}
+
 export type Office = {
   prompt?: string
   promptAt?: number
@@ -44,6 +50,7 @@ export type Office = {
   shelf?: { at: number; who: string; book: string }[] // 책장에 책(스킬) 꺼내러 간 일 (who: 'main' 또는 직원 id)
   todos?: { text: string; state: 'todo' | 'doing' | 'done' }[] // 팀장의 할 일 목록 (웹 화이트보드)
   waiting?: { at: number; who: string; what: string; id?: string } // 사장님 확인(허락 · 질문)을 기다리는 중 (id = 그 호출)
+  reviews?: Review[] // 서로 검사하기 결과 (최근 20개)
 }
 
 export type View = {
@@ -87,6 +94,7 @@ export type LogEntry = { t: number; k: string; a: unknown[] }
 export type Report = {
   at: number; prompt: string; mins: number; fails: number; papers: number; tokens: number; top?: string
   units: { key: string; people: number; mins: number; fails: number; papers: number; tokens: number }[]
+  reviews?: { by: string; unit?: string; verdict: Review['verdict']; reason?: string; nth?: number }[] // 검사 결과 한 줄씩 (by: 검사한 자리)
 }
 
 export type Replay = { from: number; log: LogEntry[]; report?: Report }

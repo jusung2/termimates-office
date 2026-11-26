@@ -2,8 +2,12 @@
 // 쓰는 법: node scripts/web-smoke.mjs
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
+import { register } from 'node:module'
+// 패널 office.ts 를 바로 읽는다 (node 22 는 .ts 의 타입을 지우고 돌림). 확장자 없는 import('./words') 만 './words.ts' 로 찾아 준다
+register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s, c, next) {
+  try { return await next(s, c) } catch (e) { if (s.startsWith('.') && !/\\.[cm]?[jt]sx?$/.test(s)) return next(s + '.ts', c); throw e } }`))
 const dir = new URL('../panel/web/', import.meta.url)
-const calls = { draw: 0, text: 0 }
+const calls = { draw: 0, text: 0, said: new Set() }
 const fakeCtx = () => new Proxy({}, {
   get(t, k) {
     if (k in t) return t[k]
@@ -11,7 +15,7 @@ const fakeCtx = () => new Proxy({}, {
     if (k === 'createLinearGradient' || k === 'createRadialGradient') return () => ({ addColorStop() {} })
     if (k === 'createImageData') return (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) })
     if (k === 'drawImage') return () => { calls.draw++ }
-    if (k === 'fillText') return () => { calls.text++ }
+    if (k === 'fillText') return (s) => { calls.text++; calls.said.add(String(s)) }
     return () => {}
   },
   set(t, k, v) { t[k] = v; return true },

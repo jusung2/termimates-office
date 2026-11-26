@@ -13,7 +13,7 @@
   const bg = document.createElement('canvas'), bctx = bg.getContext('2d');
 
   // ---- 시간 규칙 ----
-  const ASSIGN_MS = 1300, READ_MS = 4000, BOSS_MS = 7000;
+  const ASSIGN_MS = 1300, READ_MS = 4000, BOSS_MS = 7000, STAMP_MS = 1800; // STAMP_MS: 심사대에서 도장 찍고 서류가 날아가는 시간
   const WALK_SPEED = 0.09; // 걷는 속도 (월드 픽셀/ms). 거리 ÷ WALK_SPEED = 순수 걷기 시간.
 
   // ---- 배치 치수 (월드 픽셀 = 캐릭터 픽셀) ----
@@ -317,6 +317,125 @@
   }
   const slotOf = (book) => hash(book) % Math.max(1, L.books.out.length);
 
+  // ---- 심사대 (서로 검사하기) ----
+  // 검사 직원(checker)이 출근하면 문 → 심사대로 가서 앉아 검토하고, 끝나면 도장(통과 · 반려) → 서류가 날아간 뒤 문으로 퇴근.
+  // 검사 받는 직원(reviewOf)은 서류를 들고 심사대 앞에 줄을 섰다가, 반려면 서류를 돌려받아 자리로 · 통과면 서류는 팀장에게.
+  // 이번 일(사장님 지시 뒤)의 검사 직원만. 하나도 없으면 심사대를 안 그린다.
+  function reviewersOf(o) {
+    const from = (o.promptAt || 0) - 1000;
+    return (o.workers || []).filter((w) => w.checker && !w.teammate && (w.ended == null || w.started >= from));
+  }
+  const seatOfId = (id) => L.seats.find((x) => !x.lead && x.members && x.members.some((m) => m.id === id));
+  const doorIn = () => [{ x: L.doorCx, y: L.doorFoot - 20 }, { x: L.doorCx, y: L.doorFoot }, { x: L.doorCx, y: L.hallFoot }];
+  /** 큰 복도 → 심사대 뒤 자리 (심사대 왼쪽으로 돌아 들어가서 앉는다 — 앞에 선 줄과 안 부딪치게) */
+  function hallToDesk(D, sitX) {
+    if (D.mode === 'hall') return [{ x: D.sideX, y: L.hallFoot }, { x: D.sideX, y: D.seatFoot }, { x: sitX, y: D.seatFoot }];
+    const pseudo = { cx: D.cx, seatFoot: D.seatFoot, row: D.row, lead: false };
+    return toHall(pseudo, D.cx).reverse().concat([{ x: sitX, y: D.seatFoot }]);
+  }
+  const rev = (pts) => pts.slice().reverse();
+  /** 지금 심사대 장면: 앉은 검사 직원 · 줄 선 직원 · 걷는 사람 · 날아가는 서류 · 번호판 글. hide = 자리에 안 그릴 직원, gone = 퇴근 */
+  function reviewScene(o, now) {
+    const D = L && L.desk, out = { sit: [], walk: [], papers: [], stamp: null, hide: new Set(), gone: new Set(), more: 0, wait: 0, sign: null, active: [] };
+    if (!D) return out;
+    const reviews = o.reviews || [];
+    const lastOf = (id) => [...reviews].reverse().find((r) => r.by === id);
+    const exitPts = (sitX) => rev(doorIn().concat(hallToDesk(D, sitX)));
+    // 심사대에 있는 검사 직원 (출근해 오는 중 ~ 퇴근해 나가는 중). 3명 넘으면 2명만 앉히고 「+n」
+    const all = reviewersOf(o).sort((a, b) => a.started - b.started);
+    const sceneEnd = (w, sitX) => (w.ended == null ? Infinity : w.ended + STAMP_MS + lenOf(exitPts(sitX)) / WALK_SPEED);
+    const on = all.filter((w) => now >= w.started && now < sceneEnd(w, D.x + 42));
+    const cap = on.length > 3 ? 2 : on.length;
+    out.more = on.length - cap;
+    const sitXs = cap === 1 ? [D.x + 42] : cap === 2 ? [D.x + 28, D.x + 56] : [D.x + 14, D.x + 42, D.x + 70];
+    out.active = on;
+    on.slice(0, cap).forEach((w, i) => {
+      const sitX = sitXs[i], inPts = doorIn().concat(hallToDesk(D, sitX)), inMs = lenOf(inPts) / WALK_SPEED;
+      const r = w.ended != null ? lastOf(w.id) : null;
+      out.hide.add(w.id);
+      const age = now - w.started;
+      if (age < inMs) { out.walk.push({ w, m: { pts: inPts, p: ease(age / inMs) } }); return; }
+      if (w.ended == null || now < w.ended + STAMP_MS) {
+        out.sit.push({ w, x: sitX, pose: w.ended == null ? 'read' : r && r.verdict === 'pass' ? 'thumb' : 'idle', expr: r && r.verdict === 'reject' ? 'normal' : 'happy' });
+        if (w.ended != null) out.stamp = { r, q: (now - w.ended) / STAMP_MS, x: sitX };
+        return;
+      }
+      const ex = exitPts(sitX), exMs = lenOf(ex) / WALK_SPEED;
+      out.walk.push({ w, m: { pts: ex, p: ease(clamp((now - w.ended - STAMP_MS) / exMs, 0, 1)) } });
+    });
+    // 끝까지 나간 검사 직원은 퇴근
+    for (const w of all) if (now >= sceneEnd(w, D.x + 42)) out.gone.add(w.id);
+    // 줄: 검사 받는 직원 (검사 직원 출근 순). 앞 3명만 서고 나머지는 「대기 n」 숫자로
+    const queue = [];
+    for (const w of on) {
+      const t = w.reviewOf && (o.workers || []).find((x) => x.id === w.reviewOf);
+      if (t && t.ended != null && !queue.some((q) => q.t.id === t.id)) queue.push({ t, by: w });
+    }
+    out.wait = queue.filter((q) => q.by.ended == null).length;
+    if (D.mode === 'hall') queue.slice(0, 3).forEach((q, i) => {
+      const { t, by } = q, s = seatOfId(t.id);
+      const qx = D.x + 22 + i * 30, qy = D.qy;
+      // 자리에서 나오나, 이미 퇴근했으면 문에서 들어오나
+      const h = [...(o.handoffs || [])].reverse().find((x) => x.from === t.id);
+      const trip = s && h ? lenOf(toHall(s, L.lead.cx + 34)) / (WALK_SPEED * 0.4) : 0;
+      const leaveAt = t.ended + trip + 1500;
+      const fromSeat = !!s && s.worker === t && by.started + 600 < leaveAt;
+      const qPts = fromSeat ? toHall(s, qx).concat([{ x: qx, y: qy }]) : doorIn().concat([{ x: qx, y: L.hallFoot }, { x: qx, y: qy }]);
+      const qMs = lenOf(qPts) / WALK_SPEED;
+      const qStart = fromSeat ? Math.max(by.started + 600, t.ended + trip + 300) : by.started + 600;
+      if (now < qStart) return;
+      const r = by.ended != null ? lastOf(by.id) : null, reject = !!r && r.verdict === 'reject';
+      const backAt = by.ended == null ? Infinity : Math.max(by.ended + STAMP_MS, qStart + qMs);
+      const look = lookOf(s ? s.job : '개발자'), expr = r ? (reject ? 'worried' : 'happy') : 'normal';
+      out.hide.add(t.id);
+      if (now < qStart + qMs) { out.walk.push({ w: t, look, m: { pts: qPts, p: ease((now - qStart) / qMs), carry: 'doc' } }); return; }
+      if (now < backAt) { out.walk.push({ w: t, look, back: true, m: { pts: qPts, p: 1, carry: by.ended == null || (now < by.ended + STAMP_MS * 0.4) ? 'doc' : null }, expr }); return; }
+      const bAge = now - backAt;
+      if (bAge < qMs) { out.walk.push({ w: t, look, expr, m: { pts: rev(qPts), p: ease(bAge / qMs), carry: reject ? 'doc' : null } }); return; }
+      if (fromSeat) {
+        const lv = toDoor(s), lvMs = lenOf(lv) / WALK_SPEED;
+        if (bAge < qMs + lvMs) { out.walk.push({ w: t, look, expr, m: { pts: lv, p: ease((bAge - qMs) / lvMs) } }); return; }
+      }
+      out.gone.add(t.id);
+    });
+    // 도장 찍은 서류: 반려면 만든 직원(줄 · 없으면 그 자리)에게, 통과면 팀장 책상으로
+    if (out.stamp && out.stamp.r && out.stamp.q > 0.35) {
+      const { r, x } = out.stamp, q = ease(clamp((out.stamp.q - 0.35) / 0.65, 0, 1));
+      let to;
+      if (r.verdict === 'reject' && r.of) {
+        const qi = queue.findIndex((e) => e.t.id === r.of), s = seatOfId(r.of);
+        to = D.mode === 'hall' && qi >= 0 && qi < 3 ? { x: D.x + 22 + qi * 30 + 8, y: D.qy - 30 } : s ? { x: s.cx - 4, y: s.sy + 66 } : null;
+      } else if (r.verdict !== 'reject') to = { x: L.lead.cx - 6, y: L.lead.sy + 66 };
+      if (to) out.papers.push({ x0: x, y0: D.top - 4, x1: to.x, y1: to.y, q, col: r.verdict === 'reject' ? '#ffc9c9' : r.verdict === 'pass' ? '#d3f9d8' : '#fffdf5' });
+    }
+    // 번호판: 검토 중 / 통과 / ① 반려 (이번 일의 마지막 결과)
+    const from = (o.promptAt || 0) - 1000;
+    const last = [...reviews].reverse().find((r) => r.at >= from);
+    if (on.some((w) => w.ended == null)) out.sign = { text: '검토 중', bg: '#ffe066', fg: '#2b2420' };
+    else if (last) out.sign = last.verdict === 'pass' ? { text: '통과 ✓', bg: '#2f9e44', fg: '#ffffff' }
+      : last.verdict === 'reject' ? { text: `${circled(last.nth || 1)} 반려`, bg: '#c92a2a', fg: '#ffffff' } : { text: '검토 끝', bg: '#495057', fg: '#ffffff' };
+    return out;
+  }
+  const circled = (n) => (n >= 1 && n <= 20 ? String.fromCharCode(0x2460 + n - 1) : `${n}.`);
+  function drawCounter(c, D, stamp) {
+    const { x, top, w, h } = D;
+    R(c, x + 3, top + h + 6, w - 2, 4, 'rgba(0,0,0,0.22)');
+    R(c, x, top, w, 8, '#e9e2d4'); R(c, x, top, w, 2, '#ffffff'); // 밝은 상판
+    R(c, x, top + 8, w, h - 2, '#4c6a8a'); R(c, x, top + 8, w, 2, '#3b5573'); R(c, x, top + h + 4, w, 2, '#2f4560');
+    R(c, x + 6, top + 13, w - 12, 1, '#5d7fa3');
+    if (D.mode === 'hall') { // 앞 명패 (좁은 칸에선 번호판 자리)
+      R(c, x + w / 2 - 14, top + 14, 28, 9, '#f1e6c8'); R(c, x + w / 2 - 12, top + 17, 24, 1, '#8a6040'); R(c, x + w / 2 - 12, top + 20, 18, 1, '#8a6040');
+    }
+    R(c, x + 4, top - 3, 10, 4, '#fffdf5'); R(c, x + 5, top - 5, 10, 2, '#eee6d6'); // 서류 더미
+    // 도장 (도장 찍는 순간 상판에 빨강 · 초록 자국)
+    R(c, x + w - 14, top - 7, 4, 5, '#5b3a22'); R(c, x + w - 16, top - 2, 8, 2, '#c92a2a');
+    if (stamp && stamp.r && stamp.q < 0.6) R(c, stamp.x - 5, top + 1, 10, 5, stamp.r.verdict === 'reject' ? '#e03131' : stamp.r.verdict === 'pass' ? '#2f9e44' : '#868e96');
+    // 번호판 기둥 + 판 (글은 위에 겹쳐 씀)
+    const S2 = D.sign;
+    if (D.mode === 'hall') { R(c, S2.x + S2.w / 2 - 1, S2.y + S2.h, 2, top + h + 6 - S2.y - S2.h, '#5b4330'); R(c, S2.x + S2.w / 2 - 5, top + h + 4, 10, 3, '#5b4330'); }
+    R(c, S2.x - 1, S2.y - 1, S2.w + 2, S2.h + 2, '#1a1512'); R(c, S2.x, S2.y, S2.w, S2.h, '#2b2420');
+  }
+
   // 사무용 의자: 둥근 등받이 + 머리받이 (사람이 없으면 등받이가 보인다)
   function drawChair(c, s) {
     if (s.team) {
@@ -531,6 +650,14 @@
 
     const moves = new Map(), gone = new Set();
     for (const s of L.seats) { const r = motionOf(o, s, now); if (r.m) moves.set(s.key, r.m); if (r.gone) gone.add(s.key); }
+    // 심사대 장면: 심사대에 가 있는 직원은 자리에서 빼고(움직임도) 따로 그린다
+    const RV = reviewScene(o, now);
+    const away = (s) => !s.lead && !!s.worker && RV.hide.has(s.worker.id);
+    for (const s of L.seats) {
+      if (!s.worker || s.lead) continue;
+      if (RV.hide.has(s.worker.id)) moves.delete(s.key);
+      if (RV.gone.has(s.worker.id)) gone.add(s.key);
+    }
     // 책장: 자리마다 거리가 달라 shelfMs 를 직접 계산한다
     const shelfMsFor = (who) => { const seat = L.seats.find((s) => !!s.worker && (s.lead ? 'main' : s.worker.id) === who); return seat ? lenOf(toHall(seat, L.shelf.x + 40)) / (WALK_SPEED * 0.4) : 15000; };
     const taken = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm * 0.46 && now - x.at < sm + READ_MS; }).map((x) => slotOf(x.book)));
@@ -547,6 +674,7 @@
     let doorOpen = false;
     const nearDoor = (m) => { const p = at(m.pts, m.p * lenOf(m.pts)); return p.x < L.doorCx + 40 && p.y < L.doorFoot + 34; };
     for (const m of moves.values()) if (nearDoor(m)) doorOpen = true;
+    for (const x of RV.walk) if (nearDoor(x.m)) doorOpen = true;
     if (boss && nearDoor(boss)) doorOpen = true;
     drawDoorBack(c, doorOpen);
     bossAt = null;
@@ -566,7 +694,7 @@
         if (fade === 1) shadowAt(c, pt.x, pt.y, 13);
         const holding = m.carry || m.give != null;
         const pose = m.give != null ? 'hand' : walking ? (holding ? 'carry' : 'walk') : holding ? 'carry' : 'idle';
-        sprite(c, look, pt.x, pt.y - (walking && step % 2 ? 1 : 0), { pose, frame: walking ? step : frame, facing: back ? 'back' : 'front',
+        sprite(c, look, pt.x, pt.y - (walking && step % 2 ? 1 : 0), { pose, frame: walking ? step : frame, facing: m.face || (back ? 'back' : 'front'),
           carry: m.carry === 'book' ? 'book' : 'doc', expr });
         c.globalAlpha = 1;
         if (m.give != null) {
@@ -578,7 +706,7 @@
     if (boss) walker(boss, 'boss', 'normal', (pt) => { bossAt = { x: pt.x, y: pt.y, talk: bAge / BOSS_MS < 0.6 }; });
     for (const s of L.seats) {
       const w = s.worker;
-      const present = !!w && !moves.has(s.key) && !gone.has(s.key) && w.status !== 'off' && !(s.lead && w.status === 'desk');
+      const present = !!w && !moves.has(s.key) && !gone.has(s.key) && !away(s) && w.status !== 'off' && !(s.lead && w.status === 'desk');
       const reading = !!w && readers.has(s.lead ? 'main' : w.id);
       things.push({ foot: s.deskBottom, paint: () => {
         if (present) {
@@ -593,6 +721,19 @@
       const m = moves.get(s.key);
       if (m) walker(m, lookOf(s.job), exprOf(pctOf(fillOf(s)), null, now));
     }
+    // 심사대: 카운터 · 앉은 검사 직원 · 줄 선 직원 · 오가는 사람
+    if (L.desk) {
+      const D = L.desk;
+      things.push({ foot: D.top + D.h + 6, paint: () => drawCounter(c, D, RV.stamp) });
+      for (const st of RV.sit) {
+        const ss = seatOfId(st.w.id);
+        things.push({ foot: D.seatFoot, paint: () => sprite(c, lookOf(ss ? ss.job : 'QA'), st.x, D.seatFoot, { pose: st.pose, frame, expr: st.expr }) });
+      }
+      for (const x of RV.walk) {
+        const ss = seatOfId(x.w.id);
+        walker(x.back ? { ...x.m, face: 'back' } : x.m, x.look || lookOf(ss ? ss.job : 'QA'), x.expr || 'normal');
+      }
+    }
     things.sort((a, b) => a.foot - b.foot);
     for (const t of things) t.paint();
 
@@ -601,7 +742,7 @@
       c.fillStyle = 'rgba(14,20,48,0.42)'; c.fillRect(0, 0, L.W, L.H);
       c.globalCompositeOperation = 'lighter';
       for (const s of L.seats) {
-        if (!s.worker || moves.has(s.key) || gone.has(s.key) || s.worker.status === 'off' || (s.lead && s.worker.status === 'desk')) continue;
+        if (!s.worker || moves.has(s.key) || gone.has(s.key) || away(s) || s.worker.status === 'off' || (s.lead && s.worker.status === 'desk')) continue;
         const lx = s.cx - (s.lead ? 48 : 40) + 6, ly = s.sy + 60;
         const g = c.createRadialGradient(lx, ly, 2, lx, ly, 52);
         g.addColorStop(0, 'rgba(255,200,120,0.42)'); g.addColorStop(1, 'rgba(255,200,120,0)');
@@ -614,21 +755,28 @@
     for (const a of o.assigns || []) {
       const age = now - a.at;
       if (age < 0 || age >= ASSIGN_MS) continue;
-      const s = L.seats.find((x) => x.worker && x.worker.id === a.to) || L.seats.find((x) => x.members && x.members.some((mm) => mm.id === a.to));
+      const s = L.seats.find((x) => x.worker && x.worker.id === a.to) || L.seats.find((x) => !x.lead && x.members && x.members.some((mm) => mm.id === a.to));
       if (!s) continue;
       const q = ease(age / ASSIGN_MS), x0 = L.lead.cx - 20, y0 = L.lead.sy + 64, x1 = s.cx - 4, y1 = s.sy + 66;
       paper(c, x0 + (x1 - x0) * q, y0 + (y1 - y0) * q - Math.sin(q * Math.PI) * 40);
+    }
+
+    // 심사대에서 도장 찍은 서류: 반려(빨강)는 만든 직원에게, 통과(초록)는 팀장에게
+    for (const pp of RV.papers) {
+      const x = pp.x0 + (pp.x1 - pp.x0) * pp.q, y = pp.y0 + (pp.y1 - pp.y0) * pp.q - Math.sin(pp.q * Math.PI) * 26;
+      paper(c, x, y); R(c, x, y, 10, 2, pp.col === '#fffdf5' ? '#adb5bd' : pp.col === '#ffc9c9' ? '#e03131' : '#2f9e44');
     }
 
     // 확대해서 화면에 (픽셀 그대로)
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(world, 0, 0, L.W * sd, L.H * sd);
-    overlay(now, moves, gone);
+    overlay(now, moves, gone, RV);
   }
 
   // ---- 글자 (기기 해상도로 또렷하게): 말풍선 · 이름표 · 표지 ----
-  function overlay(now, moves, gone) {
+  function overlay(now, moves, gone, RV) {
+    if (!RV) RV = { hide: new Set(), gone: new Set(), sit: [], walk: [], papers: [], stamp: null, sign: null, more: 0, wait: 0, active: [] };
     const fs = Math.round(dpr * clamp(9 + (sd / dpr) * 1.6, 11, 15));
     ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
     hits = [];
@@ -689,7 +837,7 @@
     const qfs = Math.round(fs * 0.74);
     for (const row of rows.values()) {
       row.sort((a, b) => a.cx - b.cx);
-      const off = (s) => gone.has(s.key) || moves.has(s.key);
+      const off = (s) => gone.has(s.key) || moves.has(s.key) || (!s.lead && !!s.worker && RV.hide.has(s.worker.id)); // 심사대에 가 있으면 자리 말풍선 없음
       const say = (s) => (s.worker && !off(s) ? bubbleOf(s.worker) : null);
       const persona = (s) => (!s.lead && s.worker && s.worker.persona && !off(s) ? s.worker.persona : null);
       const busy = (s) => !!(say(s) || persona(s));
@@ -748,11 +896,13 @@
     }
     // 이름표 (자리 가운데) + 누를 자리
     for (const s of L.seats) {
-      const isSel = (s.pick || s.key) === sel, away = gone.has(s.key);
-      const name = (s.count > 1 && !s.team ? `${s.name} ×${s.count}` : s.name) + (away ? ' 퇴근' : '');
+      // 심사대에 가 있는 동안(검사 · 줄 서기)은 원래 자리 이름표를 흐리게, 배지 · 피로도 · ⟳ 는 안 그린다 (심사대 쪽에 보인다)
+      const atDesk = !s.lead && !!s.worker && RV.hide.has(s.worker.id), walking = moves.has(s.key);
+      const isSel = (s.pick || s.key) === sel, away = gone.has(s.key) || atDesk;
+      const name = (s.count > 1 && !s.team && s.kind !== 'fold' ? `${s.name} ×${s.count}` : s.name) + (atDesk ? ' · 심사대' : gone.has(s.key) ? ' 퇴근' : '');
       // 직급 배지: 이름표 오른쪽 같은 줄에 (밑에 두면 아랫줄 말풍선과 겹친다). 1배에서도 읽히는 크기, 자리 폭에 안 들어가면 별만,
       // 그래도 안 들어가면 안 그린다 (이름표 밑은 아랫줄 말풍선 자리, 책상 위는 그림을 가림). 페르소나가 있으면 빨간 테두리
-      const tier = !s.lead && !away && s.worker ? TIER[s.worker.tier] : null;
+      const tier = !s.lead && !atDesk && !gone.has(s.key) && s.worker ? TIER[s.worker.tier] : null;
       const nfont = `${isSel || s.lead ? 700 : 500} ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
       ctx.font = nfont;
       const pw0 = ctx.measureText(name).width + fs * 0.9, room = X(SLOT_W) - 6 * dpr, gap = 3 * dpr;
@@ -792,6 +942,31 @@
       hits.push({ key: s.pick || s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
     }
     hits.push({ key: '__shelf', x: L.shelf.x, y: L.shelf.y, w: L.shelf.w, h: L.shelf.h + 20 }); // 책장 누르면 스킬 목록
+    // 심사대: 번호판 글 · 「+n」(못 앉은 검사 직원) · 「대기 n」 · 표지. 누르면 심사대 카드
+    if (L.desk) {
+      const D = L.desk, S2 = D.sign, sfs = Math.round(fs * 0.72);
+      if (RV.sign) {
+        ctx.font = `700 ${sfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        const tw = ctx.measureText(RV.sign.text).width + sfs * 0.8, bw = Math.max(X(S2.w), tw), bh = Math.max(Y(S2.h), sfs * 1.4);
+        const bx = X(S2.x + S2.w / 2) - bw / 2, by = Y(S2.y + S2.h / 2) - bh / 2;
+        ctx.fillStyle = RV.sign.bg; roundRect(ctx, bx, by, bw, bh, 3 * dpr); ctx.fill();
+        ctx.fillStyle = RV.sign.fg; ctx.fillText(RV.sign.text, bx + bw / 2, by + bh / 2 + dpr * 0.5);
+      }
+      if (RV.more > 0) label(`+${RV.more}`, X(D.x + D.w - 6), Y(D.seatFoot - 58), { bg: '#1971c2', fg: '#ffffff', bold: true, size: sfs });
+      if (RV.wait > 3 || (D.mode === 'grid' && RV.wait > 0)) label(`대기 ${RV.wait}`, X(D.mode === 'hall' ? D.x + 52 : D.x + 18), Y(D.mode === 'hall' ? D.qy - 70 : D.top + 14), { bg: '#e8590c', fg: '#ffffff', bold: true, size: sfs });
+      const sel2 = sel === '__review';
+      // 이름표는 카운터 왼쪽 아래 끝 (앞에 줄 선 사람 몸과 안 겹치게)
+      if (D.mode === 'hall') label('심사대', X(D.x - 8), Y(D.top + D.h + 4), sel2 ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, size: sfs } : { bg: 'rgba(43,36,32,.75)', fg: '#ffd89b', size: sfs });
+      else label('심사대', X(D.cx), Y(D.sy + 115), sel2 ? { bg: '#ffd89b', fg: '#2a1d05', bold: true } : { bg: 'rgba(43,36,32,.82)', fg: '#f3ead9' });
+      // 심사대에 앉은 검사 직원: 직급 배지 · 페르소나를 머리 위에 (원래 자리 대신 여기서 보인다)
+      for (const st of RV.sit) {
+        const t = TIER[st.w.tier], bfs2 = Math.max(Math.round(10 * dpr), Math.round(fs * 0.68));
+        let y = Y(D.seatFoot - 70);
+        if (t) { label(t.stars, X(st.x), y, { bg: t.bg, fg: t.fg, bold: true, size: bfs2, border: st.w.persona ? '#ff4d4f' : null }); y -= bfs2 * 1.7; }
+        if (st.w.persona) label(`"${st.w.persona.length > 10 ? st.w.persona.slice(0, 9) + '…' : st.w.persona}"`, X(st.x), y, { bg: '#c92a2a', fg: '#ffffff', bold: true, size: Math.round(fs * 0.74) });
+      }
+      hits.push(D.mode === 'hall' ? { key: '__review', x: D.x - 10, y: S2.y - 4, w: D.w + 56, h: D.qy - S2.y + 6 } : { key: '__review', x: D.sx, y: D.sy + 4, w: SLOT_W, h: ROW_H - 4 });
+    }
     hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 옆에 소식 전체 목록 (책장처럼)
   }
   function roundRect(c, x, y, w, h, r) {
@@ -939,8 +1114,33 @@
       <div class="row"><b>걸린 시간</b>${r.mins}분 · 자리 ${r.units.length}개 (직원 ${people}명) · 서류 ${r.papers}장 · 실패 ${r.fails}번</div>
       <div class="row"><b>전기세</b>${man(r.tokens)}${r.top ? ` · 제일 많이 쓴 자리: ${esc(r.top)}` : ''}</div>
       <ul>${r.units.map((u) => `<li><b>${esc(u.key)}</b>${u.people > 1 ? ` (${u.people}명)` : ''} — ${u.mins}분 · 서류 ${u.papers}장${u.fails ? ` · 실패 ${u.fails}번` : ''}${u.tokens ? ` · ${man(u.tokens)}` : ''}</li>`).join('')}</ul>
+      ${(r.reviews || []).length ? `<h3>검사 결과</h3><ul>${r.reviews.map((x) => `<li><b>${esc(x.by)}</b> → ${reviewText(x)}</li>`).join('')}</ul>` : ''}
       <div class="note">▶ 다시 보기: Claude Code 옆 패널에서 「📋 보고서 · ▶ 다시 보기」 를 누르면 방금 일이 4배 빠르게 다시 돌아요 — 이 화면에도 같이 보여요 (토큰 0).</div>`;
   }
+  // 🔍 심사대 카드
+  const reviewText = (r) => {
+    const what = r.unit ? `${r.unit} 서류` : '서류';
+    if (r.verdict === 'pass') return `<span style="color:#2f9e44;font-weight:700">통과 ✓</span> ${esc(what)}`;
+    if (r.verdict === 'reject') return `<span style="color:#c92a2a;font-weight:700">${r.nth > 1 ? `${r.nth}번째 반려` : '반려'} ✗</span> ${esc(what)}${r.reason ? `<br><span style="color:#8a7f74">이유: ${esc(r.reason)}</span>` : ''}`;
+    return `<span style="font-weight:700">검토 끝</span> ${esc(what)} <span style="color:#8a7f74">(통과 · 반려를 글에서 못 찾음)</span>`;
+  };
+  function reviewCard() {
+    const o = snap.office, now = Date.now(), ws = o.workers || [];
+    const RV = reviewScene(o, now), from = (o.promptAt || 0) - 1000;
+    const name = (id) => { const w = ws.find((x) => x.id === id); return w ? unitName(w) + (w.member ? ' ' + w.member : '') : '?'; };
+    const busy = reviewersOf(o).filter((w) => w.ended == null);
+    const nowRows = busy.map((w) => `<li><b>${esc(name(w.id))}</b> — ${w.reviewOf ? `${esc(name(w.reviewOf))} 서류` : '서류'} 검토 중 · ${ago(now - w.started)}째<br><span style="color:#8a7f74">${esc(w.task || '')}</span></li>`);
+    const line = busy.filter((w) => w.reviewOf).map((w, i) => `<li><b>${i + 1}</b> ${esc(name(w.reviewOf))} — ${esc((ws.find((x) => x.id === w.reviewOf) || {}).task || '')}</li>`);
+    const done = (o.reviews || []).filter((r) => r.at >= from).slice(-8).reverse();
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>🔍 심사대</h2><div class="kind">검사 직원이 남이 한 일을 보고 통과 · 반려를 정해요</div></div></div>` +
+      `<h3>지금 검토 중 ${busy.length}명${RV.more ? ` <span style="font-weight:400">— 심사대엔 2명만 앉고 +${RV.more}</span>` : ''}</h3>` +
+      (nowRows.length ? `<ul>${nowRows.join('')}</ul>` : '<div class="row">지금은 없어요</div>') +
+      `<h3>대기 줄 ${line.length}명</h3>` + (line.length ? `<ul>${line.join('')}</ul>` : '<div class="row">줄 선 사람 없어요</div>') +
+      `<h3>최근 결과</h3>` + (done.length ? `<ul>${done.map((r) => `<li><time>${hhmm(r.at)}</time><b>${esc(name(r.by))}</b> → ${reviewText(r)}</li>`).join('')}</ul>` : '<div class="row">아직 없어요</div>') +
+      '<div class="note">검사 직원: 에이전트 종류 이름에 review · critic · verifier · judge 가 있거나, 맡긴 일이 검토 · 리뷰 · 심사 · 검증인 직원. QA 는 테스트를 돌리는 게 기본이라, 맡긴 일에 검토 · 리뷰 · 승인이 있을 때만 검사 직원으로 봐요.<br>' +
+      '검사 받는 직원은 검사 직원이 출근하기 직전에 일을 끝낸 직원으로 짐작해요. 통과 · 반려는 검사 직원이 남긴 마지막 글에서 뽑고, 애매하면 「검토 끝」 으로만 보여요.</div>';
+  }
+
   // 👥 명부: 내가 만든 에이전트 (.claude/agents)
   function rosterCard() {
     const list = snap.roster || [];
@@ -1009,6 +1209,17 @@
         $('cardBody').innerHTML = html;
         const f = $('cardFace'), fc = f && f.getContext('2d');
         if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('lead', { pose: 'idle', expr: 'happy' }), 0, 0); }
+      }
+      el.hidden = false;
+      return;
+    }
+    if (sel === '__review') {
+      const html = reviewCard();
+      if (html !== lastCardHtml) {
+        lastCardHtml = html;
+        $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d');
+        if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('qa', { pose: 'read' }), 0, 0); }
       }
       el.hidden = false;
       return;
@@ -1167,6 +1378,7 @@
     hud();
     if (sel && sel !== 'main' && !sel.startsWith('__') && !(snap.units || []).some((u) => u.key === sel)) sel = null; // __ 로 시작 = 책장 · 보고서 · 명부 · 도움말 카드
     if (sel === '__report' && !snap.report) sel = null;
+    if (sel === '__review' && !(L && L.desk)) sel = null; // 검사 직원이 없어져 심사대가 사라짐
     if (sel) card();
   }
   function connect() {
