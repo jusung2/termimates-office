@@ -12,15 +12,20 @@
   const world = document.createElement('canvas'), wctx = world.getContext('2d');
   const bg = document.createElement('canvas'), bctx = bg.getContext('2d');
 
-  // ---- 시간 규칙 (패널 scene.ts 와 같게) ----
-  const TRIP_MS = 4400, ASSIGN_MS = 1300, SHELF_MS = 5200, READ_MS = 4000, ARRIVE_MS = 3200, LEAVE_MS = 3200, BOSS_MS = 7000;
+  // ---- 시간 규칙 ----
+  const ASSIGN_MS = 1300, READ_MS = 4000, BOSS_MS = 7000, STAMP_MS = 1800; // STAMP_MS: 심사대에서 도장 찍고 서류가 날아가는 시간
+  const WALK_SPEED = 0.09; // 걷는 속도 (월드 픽셀/ms). 거리 ÷ WALK_SPEED = 순수 걷기 시간.
+  // 놓친 일 서류: 팀장이 걸어가 줍고 돌아오는 시간 · 그 뒤 자리에서 읽고 입력창에 넣기까지 (패널 office.ts PICK_WALK_MS · PICK_MS 와 같게)
+  const PICK_WALK_MS = 5600, PICK_MS = 7000;
 
   // ---- 배치 치수 (월드 픽셀 = 캐릭터 픽셀) ----
   const SLOT_W = 100, ROW_H = 128, WALL_H = 72, SIDE = 64, RIGHT = 16, SHELF_W = 112, MIN_W = 380;
+  const PART_PAD = 20; // 파트 줄 위 「▸ 개발자 파트」 띠 높이
   const FOOT = S.FOOT, SW = S.W;
 
   // ---- 상태 ----
   let bossAt = null; // 사장님이 지금 어디 있는지 (말풍선용)
+  const boxes = { bubbles: [], tags: [] }; // 지난 장면의 말풍선 · 묶음 글 자리 (기기 픽셀, 겹침 시험용)
   let snap = null, sel = null, L = null, sd = 2, dpr = 1, lastBgKey = '', hits = [], hover = null;
   const qs = new URLSearchParams(location.search);
   const session = qs.get('session') || 'auto';
@@ -52,6 +57,13 @@
   const lookOf = (job) => LOOK[job] || 'guest';
 
   // ---- 말풍선 글 (패널 words.ts 와 같은 뜻) ----
+  // 직급 배지: 모델 직급 (haiku 인턴 · sonnet 주니어 · opus 시니어 · 바깥 AI 협력사). 글자 말고 색으로도 구분
+  const TIER = {
+    intern: { stars: '★', name: '인턴', bg: '#1c3d73', fg: '#a5d8ff' },
+    junior: { stars: '★★', name: '주니어', bg: '#1b4d2e', fg: '#b2f2bb' },
+    senior: { stars: '★★★', name: '시니어', bg: '#5c4305', fg: '#ffe066' },
+    partner: { stars: '🤝', name: '협력사', bg: '#3d2466', fg: '#e5dbff' },
+  };
   const BUBBLE = { think: '생각 중…', handoff: '서류 전달!', ask: '지시 기다려요', wait_report: '보고 기다리는 중', done: '보고 완료 ✓', idle: '쉬는 중', unfinished: '못 끝냈어요…' };
   const VERB = { Read: '읽는 중', Edit: '고치는 중', MultiEdit: '고치는 중', NotebookEdit: '고치는 중', Write: '쓰는 중', Bash: '실행 중',
     Grep: '찾는 중', Glob: '찾는 중', WebSearch: '검색 중', WebFetch: '읽는 중', Skill: '스킬 읽는 중', Agent: '일 맡기는 중', Task: '일 맡기는 중',
@@ -79,8 +91,48 @@
     return { long, short: v };
   }
 
+  // ---- 자리 접기 (패널 office.ts fold() 와 같은 규칙: 패널이 적어 준 접기 단계 중 들어가는 첫 단계, 그래도 넘치면 앞 max-1 자리 + 「+n명」) ----
+  function foldPick(steps, max) {
+    const m = Math.max(1, Math.floor(max));
+    const fit = steps.find((st) => st.length <= m);
+    if (fit) return fit;
+    const last = steps[steps.length - 1] || [], keep = last.slice(0, m - 1), rest = last.slice(m - 1);
+    const n = rest.reduce((a, x) => a + x.people, 0);
+    return keep.concat([{ key: '__more', pick: '__more', kind: 'more', units: rest.flatMap((x) => x.units), label: `+${n}명`, family: '', people: n }]);
+  }
+  const ORDER = ['handoff', 'work', 'think', 'ask', 'wait_report', 'unfinished', 'done', 'idle', 'off', 'desk'];
+  /** 접기 단계 (패널이 적어 준 것. 예전 패널이면 자리마다 한 자리) */
+  function stepsOf() {
+    const units = (snap && snap.units) || [];
+    if (snap && snap.steps && snap.steps.main) return snap.steps;
+    return { main: [units.map((u) => ({ key: u.key, pick: u.key, kind: 'unit', units: [u.key], label: u.key, family: u.family || u.job, people: u.count || 1 }))], part: [] };
+  }
+  /** 화면 한 자리 → 자리 정보 (대표 직원 · 팀원 점 · 이름표) */
+  function spotSeat(sp, o) {
+    const units = (snap && snap.units) || [];
+    const us = sp.units.map((k) => units.find((u) => u.key === k)).filter(Boolean);
+    const wOf = (id) => (o.workers || []).find((x) => x.id === id);
+    const members = us.flatMap((u) => u.members);
+    // leaving: 이 자리에서 나가는 중인 앞사람 (새 사람이 자리를 이어받아도 문까지 끝까지 걷는다 — 패널 office.ts unitsOf)
+    const leaving = (sp.leaving || []).map(wOf).filter(Boolean);
+    const base = { key: sp.key, pick: sp.pick, kind: sp.kind, units: sp.units, name: sp.label, members, team: false, count: 0, boss: us[0] && us[0].boss, leaving };
+    if (sp.kind === 'twin') {
+      const w = wOf(sp.who);
+      const first = /#1$/.test(sp.key); // 파트장 표시 · ⟳n 은 묶음 첫 자리에만
+      return Object.assign(base, { job: sp.family, worker: w, members: w ? [{ id: w.id, status: w.status }] : [], count: 1, loop: first && us[0] ? us[0].loop : 0, kids: first && us[0] ? us[0].kids : 0 });
+    }
+    if (sp.kind === 'unit' && us[0]) {
+      const u = us[0];
+      return Object.assign(base, { job: u.family || u.job, worker: wOf(u.worker), team: u.team, members: u.members, count: u.count, loop: u.loop, kids: u.kids });
+    }
+    // 접은 자리: 지금 일하는 사람을 대표로, 팀 자리처럼 칸막이 + 사람마다 점. 「+n명」 은 빈 책상
+    const best = us.map((u) => wOf(u.worker)).filter(Boolean).sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status))[0];
+    return Object.assign(base, { job: sp.family, worker: sp.kind === 'more' ? null : best, team: sp.kind === 'fold', more: sp.kind === 'more' });
+  }
+
   // ---- 배치 ----
-  function layout(W) {
+  // Hmax(월드 픽셀)를 주면 그 높이에 맞춰 접는다 (배율을 바닥까지 낮춰도 안 들어갈 때만). 없으면 다 펼친다
+  function layout(W, Hmax) {
     const shelf = { x: W - RIGHT - SHELF_W, y: 14, w: SHELF_W, h: WALL_H + 70 };
     const leadCx = Math.round(Math.min(W / 2, shelf.x - SLOT_W / 2 - 70));
     const leadSy = WALL_H - 22;
@@ -94,24 +146,55 @@
     const left = SIDE + Math.floor((usable - perRow * SLOT_W) / 2);
     const seats = [];
     const o = snap && snap.office;
-    if (o) seats.push(mkSeat({ key: 'main', job: '팀장', name: '팀장', worker: o.lead, team: false, members: null, count: 0 }, leadCx - SLOT_W / 2, leadSy, -1, true));
-    units.forEach((u, i) => {
-      const r = Math.floor(i / perRow), c = i % perRow;
-      const w = o.workers.find((x) => x.id === u.worker);
-      seats.push(mkSeat({ key: u.key, job: u.family || u.job, name: u.key, worker: w, team: u.team, members: u.members, count: u.count }, left + c * SLOT_W, staffTop + r * ROW_H, r, false));
-    });
-    const rows = Math.max(1, Math.ceil(units.length / perRow));
+    // 심사대: 검사 직원이 있을 때만. 팀장 오른쪽 빈 바닥(팀장이 복도로 가는 길 · 책장 앞 화분 사이) → 안 되면 팀장 왼쪽
+    // (문 쪽 길 · 화분과 떨어진 팀장 깔개 옆) → 둘 다 좁으면 직원 자리 맨 끝 한 칸을 쓴다. 문 · 복도 · 책장 · 화이트보드 · 게시판과 안 겹친다
+    const NEED = 140;
+    const deskOn = !!o && reviewersOf(o).length > 0;
+    const rightX = [leadCx + 96, shelf.x - 34], leftX = [100, leadCx - 70];
+    const hallX = !deskOn ? null : rightX[1] - rightX[0] >= NEED ? rightX[0] : leftX[1] - leftX[0] >= NEED ? leftX[1] - NEED : null;
+    const deskSlot = deskOn && hallX == null ? 1 : 0;
+    // 층: 파트장(에이전트가 부른 에이전트를 둔 직원)이 있을 때만 맨 아래 한 줄을 더해 그 아래 직원을 앉힌다
     const NEWS_H = 92;
+    const st = stepsOf();
+    let hasPart = !!(st.part && st.part.length && st.part[0].length);
+    let maxMain = Infinity;
+    if (Hmax) {
+      const fitRows = (part) => Math.floor((Hmax - staffTop - 14 - (part ? PART_PAD : 0) - (besideShelf ? 0 : NEWS_H + 28)) / ROW_H) - (part ? 1 : 0);
+      if (hasPart && fitRows(true) < 1) hasPart = false; // 파트 줄까지는 안 들어가면 터미널처럼 파트장 자리의 「파트장」 표시 · 카드로만
+      maxMain = Math.max(1, fitRows(hasPart) * perRow - deskSlot);
+    }
+    const main = o ? foldPick(st.main, maxMain) : [], part = o && hasPart ? foldPick(st.part, perRow) : [];
+    const slots = main.length + deskSlot;
+    if (o) seats.push(mkSeat({ key: 'main', job: '팀장', name: '팀장', worker: o.lead, team: false, members: null, count: 0 }, leadCx - SLOT_W / 2, leadSy, -1, true));
+    main.forEach((sp, i) => {
+      const r = Math.floor(i / perRow), c = i % perRow;
+      seats.push(mkSeat(spotSeat(sp, o), left + c * SLOT_W, staffTop + r * ROW_H, r, false));
+    });
+    const mainRows = Math.max(1, Math.ceil(slots / perRow));
+    const partRow = part.length ? mainRows : -1;
+    part.forEach((sp, i) => seats.push(mkSeat(spotSeat(sp, o), left + i * SLOT_W, staffTop + partRow * ROW_H + PART_PAD, partRow, false)));
+    const rows = mainRows + (part.length ? 1 : 0), pad = part.length ? PART_PAD : 0;
+    let desk = null;
+    if (deskOn && hallX != null) {
+      const top = leadSy + 78;
+      desk = { mode: 'hall', x: hallX + 14, top, w: 84, h: 24, seatFoot: top + 19, sideX: hallX + 2, qy: hallTop + 46,
+        sign: { x: hallX + 102, y: top - 34, w: 36, h: 16 } };
+    } else if (deskOn) {
+      const i = main.length, r = Math.floor(i / perRow), c = i % perRow, sx = left + c * SLOT_W, sy = staffTop + r * ROW_H;
+      desk = { mode: 'grid', x: sx + 8, top: sy + 72, w: 84, h: 24, seatFoot: sy + 91, cx: sx + SLOT_W / 2, row: r, sx, sy,
+        sign: { x: sx + 26, y: sy + 82, w: 48, h: 12 } }; // 좁은 칸: 번호판은 카운터 앞판에
+    }
     const news = besideShelf ? { x: shelf.x, y: staffTop + 6, w: SHELF_W, h: NEWS_H }
-      : { x: W - RIGHT - SHELF_W, y: staffTop + rows * ROW_H + 4, w: SHELF_W, h: NEWS_H };
-    const H = Math.max(staffTop + rows * ROW_H + 14, news.y + news.h + 24);
+      : { x: W - RIGHT - SHELF_W, y: staffTop + rows * ROW_H + pad + 4, w: SHELF_W, h: NEWS_H };
+    const H = Math.max(staffTop + rows * ROW_H + pad + 14, news.y + news.h + 24);
     // 출입문은 뒷벽 왼쪽. 문 → 왼쪽 길 → 큰 복도로 드나든다
     const door = { x: 22, y: 8, w: 42, h: WALL_H + 4 };
     const lay = { W, H, seats, shelf, hallTop, hallFoot, staffTop, door, doorCx: door.x + door.w / 2, doorFoot: door.y + door.h, corridorX: door.x + door.w / 2,
-      aisleFoot: (k) => staffTop + k * ROW_H + ROW_H - 6, lead: seats[0], books: null };
+      aisleFoot: (k) => staffTop + k * ROW_H + ROW_H - 6, lead: seats[0], books: null, partRow, perRow };
     // 벽: 문 · 시계 · 화이트보드(사장님 지시 · 할 일) · 팀장 뒤 회사 간판 · 남은 자리에 창문
     lay.plaque = { x: Math.max(104, leadCx - 56), y: 12, w: 112, h: 24 }; // 시계(왼쪽)를 피해서
     lay.news = news;
+    lay.desk = desk;
     const boardW = Math.min(128, lay.plaque.x - 14 - 104); // 좁은 창: 간판과 안 겹치게 줄이고, 너무 좁으면 뺀다
     lay.board = boardW >= 70 ? { x: 104, y: 9, w: boardW, h: 48 } : null;
     lay.wins = [];
@@ -136,14 +219,17 @@
   function fit() {
     dpr = window.devicePixelRatio || 1;
     const cw = Math.max(200, stage.clientWidth - room()) * dpr, ch = stage.clientHeight * dpr;
+    // 「크게 → 작게(바닥 배율까지) → 접기 → +n」: 한 화면에 다 들어가는 가장 큰 배율. 바닥 배율(CSS 1배 — 캐릭터를 알아볼 수 있는
+    // 가장 작은 크기)까지 낮춰도 안 들어가면 그 배율에서 높이에 맞춰 같은 직군 접기 → 「+n명」. 세로 스크롤은 기본으로 안 쓴다
+    const floor = Math.max(1, Math.round(dpr));
     let pick = null;
-    for (let s = 8; s >= 1; s--) {
+    for (let s = 8; s >= floor; s--) {
       const W = Math.floor(cw / s);
-      if (W < MIN_W && s > 1) continue;
+      if (W < MIN_W && s > floor) continue;
       const lay = layout(W);
       if (lay.H * s <= ch) { pick = { s, lay }; break; }
-      if (!pick || (W >= MIN_W && s < pick.s)) pick = { s, lay }; // 안 맞으면 가장 작은 배율(세로 스크롤)
     }
+    if (!pick) { const W = Math.max(MIN_W, Math.floor(cw / floor)), Hmax = Math.floor(ch / floor); pick = { s: floor, lay: Object.assign(layout(W, Hmax), { Hmax }) }; }
     sd = pick.s; L = pick.lay;
     if (world.width !== L.W || world.height !== L.H) { world.width = L.W; world.height = L.H; }
     if (canvas.width !== L.W * sd) canvas.width = L.W * sd; // 크기가 같으면 건드리지 않는다 (바꾸면 그림판이 비워짐)
@@ -309,6 +395,29 @@
   }
   const slotOf = (book) => hash(book) % Math.max(1, L.books.out.length);
 
+  /** 나란히 앉은 같은 일 직원 묶음(이어진 twin 자리) · 파트장 아래 줄 묶음(같은 파트장) */
+  function groupsOf(test) {
+    const out = [];
+    for (const s of L.seats) {
+      const k = test(s);
+      if (k == null) continue;
+      const g = out[out.length - 1];
+      if (g && g.k === k && g.sy === s.sy && g.x1 === s.sx) { g.x1 = s.sx + SLOT_W; g.seats.push(s); } else out.push({ k, sy: s.sy, x0: s.sx, x1: s.sx + SLOT_W, seats: [s] });
+    }
+    return out;
+  }
+  const twinGroups = () => groupsOf((s) => (s.kind === 'twin' ? s.pick : null)); // 줄이 바뀌면 묶음도 줄마다
+  const partGroups = () => groupsOf((s) => (!s.lead && s.row === L.partRow ? s.boss || '?' : null));
+  function drawGroups(c) {
+    for (const g of twinGroups()) { // 같은 일 병렬: 청록 깔개 하나 위에 같은 책상이 나란히
+      R(c, g.x0 + 4, g.sy + 32, g.x1 - g.x0 - 8, 78, '#2f8f83'); R(c, g.x0 + 6, g.sy + 34, g.x1 - g.x0 - 12, 74, '#5fb3a6');
+      for (let x = g.x0 + 10; x < g.x1 - 10; x += 8) R(c, x, g.sy + 106, 4, 1, '#8fd3c7');
+    }
+    for (const g of partGroups()) { // 파트 줄: 파트마다 연보라 바닥 띠 (위 띠에 「▸ 개발자 파트」 글)
+      R(c, g.x0 + 2, g.sy - PART_PAD + 2, g.x1 - g.x0 - 4, ROW_H + PART_PAD - 8, '#7b6fae'); R(c, g.x0 + 4, g.sy - PART_PAD + 4, g.x1 - g.x0 - 8, ROW_H + PART_PAD - 12, '#a99fd6');
+    }
+  }
+
   // 사무용 의자: 둥근 등받이 + 머리받이 (사람이 없으면 등받이가 보인다)
   function drawChair(c, s) {
     if (s.team) {
@@ -370,6 +479,29 @@
     }
   }
 
+  // ---- 놓친 일 서류 (패널 office.ts onMissed: 흔적 있는 것만) ----
+  // 그 일을 맡았던 자리 바로 위 통로 바닥에 떨어져 있다. 자리가 없으면 · 팀장 것이면 팀장 책상 왼쪽 큰 복도
+  function paperSpots(o) {
+    const n = new Map(), lead = L.lead;
+    if (!lead) return [];
+    return (o.papers || []).map((p) => {
+      const s = p.who === 'main' ? null : L.seats.find((x) => !x.lead && ((x.worker && x.worker.id === p.who) || (x.members || []).some((m) => m.id === p.who)))
+        || L.seats.find((x) => !x.lead && (x.pick || x.key) === p.unit) || null;
+      const at = s || lead, i = n.get(at.key) || 0;
+      n.set(at.key, i + 1);
+      if (!s) return { p, x: Math.max(SIDE + 10, lead.cx - 84 - i * 16), y: L.hallFoot - 3, row: -1 };
+      return { p, x: s.sx + SLOT_W - 24 - i * 16, y: (s.row === 0 ? L.hallFoot : L.aisleFoot(s.row - 1)) - 3, row: s.row };
+    });
+  }
+  /** 바닥에 떨어진 종이 (조금 비뚤게 · 접힌 귀퉁이 · 빨간 줄) + 위에서 통통 튀는 「!」 */
+  function drawLost(c, x, y, frame) {
+    R(c, x + 1, y + 1, 14, 3, 'rgba(0,0,0,0.25)');
+    R(c, x, y - 8, 13, 9, '#fffdf5'); R(c, x + 1, y - 9, 12, 1, '#fffdf5'); R(c, x + 10, y - 8, 3, 3, '#d9d2c3');
+    R(c, x + 2, y - 6, 7, 1, '#e03131'); R(c, x + 2, y - 4, 8, 1, '#adb5bd'); R(c, x + 2, y - 2, 6, 1, '#adb5bd');
+    const by = y - 20 - (frame % 2);
+    R(c, x + 5, by, 3, 6, '#e03131'); R(c, x + 5, by + 8, 3, 3, '#e03131'); R(c, x + 6, by + 1, 1, 4, '#ff8787');
+  }
+
   // ---- 움직임 (패널 scene.ts motionOf 와 같은 규칙) ----
   function toHall(s, x) {
     const start = { x: s.cx, y: s.seatFoot };
@@ -402,36 +534,183 @@
     const z = pts[pts.length - 1], y = pts[pts.length - 2] || z;
     return { x: z.x, y: z.y, dx: z.x - y.x, dy: z.y - y.y };
   }
-  function motionOf(o, s, now) {
-    const w = s.worker;
+  function motionOf(o, s, now, who) {
+    const w = who || s.worker; // who: 자리에서 나가는 앞사람 (보고 · 퇴근 걸음만)
     if (!w) return {};
     const id = s.lead ? 'main' : w.id;
     const h = s.lead ? null : [...(o.handoffs || [])].reverse().find((x) => x.from === w.id);
     const hAge = h ? now - h.at : -1;
-    if (h && hAge >= 0 && hAge < TRIP_MS) {
-      const pts = toHall(s, L.lead.cx + 34), t = hAge / TRIP_MS;
-      if (t < 0.4) return { m: { pts, p: ease(t / 0.4), carry: 'doc' } };
-      if (t < 0.6) return { m: { pts, p: 1, give: ease((t - 0.4) / 0.2) } };
-      return { m: { pts, p: 1 - ease((t - 0.6) / 0.4) } };
+    // 보고: 자리 → 팀장 앞 → 돌아옴 (거리 기반 시간)
+    if (h && hAge >= 0) {
+      const pts = toHall(s, L.lead.cx + 34), tripMs = lenOf(pts) / (WALK_SPEED * 0.4);
+      if (hAge < tripMs) {
+        const t = hAge / tripMs;
+        if (t < 0.4) return { m: { pts, p: ease(t / 0.4), carry: 'doc' } };
+        if (t < 0.6) return { m: { pts, p: 1, give: ease((t - 0.4) / 0.2) } };
+        return { m: { pts, p: 1 - ease((t - 0.6) / 0.4) } };
+      }
     }
+    // 퇴근: 보고 끝난 뒤 문으로
     if (w.ended != null && !s.lead) {
-      const leaveAt = w.ended + (h && h.at >= w.ended - 1000 ? TRIP_MS : 0) + 1500, lAge = now - leaveAt;
-      if (lAge >= LEAVE_MS) return { gone: true };
-      if (lAge >= 0) return { m: { pts: toDoor(s), p: ease(lAge / LEAVE_MS) } };
+      const leavePts = toDoor(s), leaveMs = lenOf(leavePts) / WALK_SPEED;
+      const tripMs = h ? lenOf(toHall(s, L.lead.cx + 34)) / (WALK_SPEED * 0.4) : 0;
+      const leaveAt = w.ended + (h && h.at >= w.ended - 1000 ? tripMs : 0) + 1500, lAge = now - leaveAt;
+      if (lAge >= leaveMs) return { gone: true };
+      if (lAge >= 0) return { m: { pts: leavePts, p: ease(lAge / leaveMs) } };
     }
+    if (who) return {}; // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
+    // 놓친 일 서류: 팀장이 그 자리 근처로 걸어가 줍고 → 자리로 돌아온다 (그 뒤 자리에서 읽음)
+    if (s.lead && !who) {
+      const got = paperSpots(o).find((x) => x.p.picked != null && now - x.p.picked >= 0 && now - x.p.picked < PICK_WALK_MS);
+      if (got) {
+        const tx = got.x - 10;
+        const pts = got.row <= 0 ? toHall(s, tx) : toHall(s, L.corridorX).concat([{ x: L.corridorX, y: L.aisleFoot(got.row - 1) }, { x: tx, y: L.aisleFoot(got.row - 1) }]);
+        const t = (now - got.p.picked) / PICK_WALK_MS;
+        if (t < 0.45) return { m: { pts, p: ease(t / 0.45) } };
+        if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.5 ? 'doc' : null, reach: true } };
+        return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'doc' } };
+      }
+    }
+    // 책장: 스킬을 쓰면 갔다 옴
     const sh = [...(o.shelf || [])].reverse().find((x) => x.who === id);
     const sAge = sh ? now - sh.at : -1;
-    if (sh && sAge >= 0 && sAge < SHELF_MS) {
-      const pts = toHall(s, L.shelf.x + 40), t = sAge / SHELF_MS;
-      if (t < 0.4) return { m: { pts, p: ease(t / 0.4) } };
-      if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.48 ? 'book' : null, reach: true } };
-      return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'book' } };
+    if (sh && sAge >= 0) {
+      const pts = toHall(s, L.shelf.x + 40), shelfMs = lenOf(pts) / (WALK_SPEED * 0.4);
+      if (sAge < shelfMs) {
+        const t = sAge / shelfMs;
+        if (t < 0.4) return { m: { pts, p: ease(t / 0.4) } };
+        if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.48 ? 'book' : null, reach: true } };
+        return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'book' } };
+      }
     }
+    // 출근: 문에서 자리로
     if (!s.lead) {
       const aAge = now - w.started;
-      if (aAge >= 0 && aAge < ARRIVE_MS) return { m: { pts: toDoor(s), p: 1 - ease(aAge / ARRIVE_MS) } };
+      if (aAge >= 0) {
+        const arrivePts = toDoor(s), arriveMs = lenOf(arrivePts) / WALK_SPEED;
+        if (aAge < arriveMs) return { m: { pts: arrivePts, p: 1 - ease(aAge / arriveMs) } };
+      }
     }
     return {};
+  }
+
+  // ---- 심사대 (서로 검사하기) ----
+  // 검사 직원(checker)이 출근하면 문 → 심사대로 가서 앉아 검토하고, 끝나면 도장(통과 · 반려) → 서류가 날아간 뒤 문으로 퇴근.
+  // 검사 받는 직원(reviewOf)은 서류를 들고 심사대 앞에 줄을 섰다가, 반려면 서류를 돌려받아 자리로 · 통과면 서류는 팀장에게.
+  // 이번 일(사장님 지시 뒤)의 검사 직원만. 하나도 없으면 심사대를 안 그린다.
+  function reviewersOf(o) {
+    const from = (o.promptAt || 0) - 1000;
+    return (o.workers || []).filter((w) => w.checker && !w.teammate && (w.ended == null || w.started >= from));
+  }
+  const seatOfId = (id) => L.seats.find((x) => !x.lead && x.members && x.members.some((m) => m.id === id));
+  const doorIn = () => [{ x: L.doorCx, y: L.doorFoot - 20 }, { x: L.doorCx, y: L.doorFoot }, { x: L.doorCx, y: L.hallFoot }];
+  /** 큰 복도 → 심사대 뒤 자리 (심사대 왼쪽으로 돌아 들어가서 앉는다 — 앞에 선 줄과 안 부딪치게) */
+  function hallToDesk(D, sitX) {
+    if (D.mode === 'hall') return [{ x: D.sideX, y: L.hallFoot }, { x: D.sideX, y: D.seatFoot }, { x: sitX, y: D.seatFoot }];
+    const pseudo = { cx: D.cx, seatFoot: D.seatFoot, row: D.row, lead: false };
+    return toHall(pseudo, D.cx).reverse().concat([{ x: sitX, y: D.seatFoot }]);
+  }
+  const rev = (pts) => pts.slice().reverse();
+  /** 지금 심사대 장면: 앉은 검사 직원 · 줄 선 직원 · 걷는 사람 · 날아가는 서류 · 번호판 글. hide = 자리에 안 그릴 직원, gone = 퇴근 */
+  function reviewScene(o, now) {
+    const D = L && L.desk, out = { sit: [], walk: [], papers: [], stamp: null, hide: new Set(), gone: new Set(), more: 0, wait: 0, sign: null, active: [] };
+    if (!D) return out;
+    const reviews = o.reviews || [];
+    const lastOf = (id) => [...reviews].reverse().find((r) => r.by === id);
+    const exitPts = (sitX) => rev(doorIn().concat(hallToDesk(D, sitX)));
+    // 심사대에 있는 검사 직원 (출근해 오는 중 ~ 퇴근해 나가는 중). 3명 넘으면 2명만 앉히고 「+n」
+    const all = reviewersOf(o).sort((a, b) => a.started - b.started);
+    const sceneEnd = (w, sitX) => (w.ended == null ? Infinity : w.ended + STAMP_MS + lenOf(exitPts(sitX)) / WALK_SPEED);
+    const on = all.filter((w) => now >= w.started && now < sceneEnd(w, D.x + 42));
+    const cap = on.length > 3 ? 2 : on.length;
+    out.more = on.length - cap;
+    const sitXs = cap === 1 ? [D.x + 42] : cap === 2 ? [D.x + 28, D.x + 56] : [D.x + 14, D.x + 42, D.x + 70];
+    out.active = on;
+    on.slice(0, cap).forEach((w, i) => {
+      const sitX = sitXs[i], inPts = doorIn().concat(hallToDesk(D, sitX)), inMs = lenOf(inPts) / WALK_SPEED;
+      const r = w.ended != null ? lastOf(w.id) : null;
+      out.hide.add(w.id);
+      const age = now - w.started;
+      if (age < inMs) { out.walk.push({ w, m: { pts: inPts, p: ease(age / inMs) } }); return; }
+      if (w.ended == null || now < w.ended + STAMP_MS) {
+        out.sit.push({ w, x: sitX, pose: w.ended == null ? 'read' : r && r.verdict === 'pass' ? 'thumb' : 'idle', expr: r && r.verdict === 'reject' ? 'normal' : 'happy' });
+        if (w.ended != null) out.stamp = { r, q: (now - w.ended) / STAMP_MS, x: sitX };
+        return;
+      }
+      const ex = exitPts(sitX), exMs = lenOf(ex) / WALK_SPEED;
+      out.walk.push({ w, m: { pts: ex, p: ease(clamp((now - w.ended - STAMP_MS) / exMs, 0, 1)) } });
+    });
+    // 끝까지 나간 검사 직원은 퇴근
+    for (const w of all) if (now >= sceneEnd(w, D.x + 42)) out.gone.add(w.id);
+    // 줄: 검사 받는 직원 (검사 직원 출근 순). 앞 3명만 서고 나머지는 「대기 n」 숫자로
+    const queue = [];
+    for (const w of on) {
+      const t = w.reviewOf && (o.workers || []).find((x) => x.id === w.reviewOf);
+      if (t && t.ended != null && !queue.some((q) => q.t.id === t.id)) queue.push({ t, by: w });
+    }
+    out.wait = queue.filter((q) => q.by.ended == null).length;
+    if (D.mode === 'hall') queue.slice(0, 3).forEach((q, i) => {
+      const { t, by } = q, s = seatOfId(t.id);
+      const qx = D.x + 22 + i * 30, qy = D.qy;
+      // 자리에서 나오나, 이미 퇴근했으면 문에서 들어오나
+      const h = [...(o.handoffs || [])].reverse().find((x) => x.from === t.id);
+      const trip = s && h ? lenOf(toHall(s, L.lead.cx + 34)) / (WALK_SPEED * 0.4) : 0;
+      const leaveAt = t.ended + trip + 1500;
+      const fromSeat = !!s && s.worker === t && by.started + 600 < leaveAt;
+      const qPts = fromSeat ? toHall(s, qx).concat([{ x: qx, y: qy }]) : doorIn().concat([{ x: qx, y: L.hallFoot }, { x: qx, y: qy }]);
+      const qMs = lenOf(qPts) / WALK_SPEED;
+      const qStart = fromSeat ? Math.max(by.started + 600, t.ended + trip + 300) : by.started + 600;
+      if (now < qStart) return;
+      const r = by.ended != null ? lastOf(by.id) : null, reject = !!r && r.verdict === 'reject';
+      const backAt = by.ended == null ? Infinity : Math.max(by.ended + STAMP_MS, qStart + qMs);
+      const look = lookOf(s ? s.job : '개발자'), expr = r ? (reject ? 'worried' : 'happy') : 'normal';
+      out.hide.add(t.id);
+      if (now < qStart + qMs) { out.walk.push({ w: t, look, m: { pts: qPts, p: ease((now - qStart) / qMs), carry: 'doc' } }); return; }
+      if (now < backAt) { out.walk.push({ w: t, look, back: true, m: { pts: qPts, p: 1, carry: by.ended == null || (now < by.ended + STAMP_MS * 0.4) ? 'doc' : null }, expr }); return; }
+      const bAge = now - backAt;
+      if (bAge < qMs) { out.walk.push({ w: t, look, expr, m: { pts: rev(qPts), p: ease(bAge / qMs), carry: reject ? 'doc' : null } }); return; }
+      if (fromSeat) {
+        const lv = toDoor(s), lvMs = lenOf(lv) / WALK_SPEED;
+        if (bAge < qMs + lvMs) { out.walk.push({ w: t, look, expr, m: { pts: lv, p: ease((bAge - qMs) / lvMs) } }); return; }
+      }
+      out.gone.add(t.id);
+    });
+    // 도장 찍은 서류: 반려면 만든 직원(줄 · 없으면 그 자리)에게, 통과면 팀장 책상으로
+    if (out.stamp && out.stamp.r && out.stamp.q > 0.35) {
+      const { r, x } = out.stamp, q = ease(clamp((out.stamp.q - 0.35) / 0.65, 0, 1));
+      let to;
+      if (r.verdict === 'reject' && r.of) {
+        const qi = queue.findIndex((e) => e.t.id === r.of), s = seatOfId(r.of);
+        to = D.mode === 'hall' && qi >= 0 && qi < 3 ? { x: D.x + 22 + qi * 30 + 8, y: D.qy - 30 } : s ? { x: s.cx - 4, y: s.sy + 66 } : null;
+      } else if (r.verdict !== 'reject') to = { x: L.lead.cx - 6, y: L.lead.sy + 66 };
+      if (to) out.papers.push({ x0: x, y0: D.top - 4, x1: to.x, y1: to.y, q, col: r.verdict === 'reject' ? '#ffc9c9' : r.verdict === 'pass' ? '#d3f9d8' : '#fffdf5' });
+    }
+    // 번호판: 검토 중 / 통과 / ① 반려 (이번 일의 마지막 결과)
+    const from = (o.promptAt || 0) - 1000;
+    const last = [...reviews].reverse().find((r) => r.at >= from);
+    if (on.some((w) => w.ended == null)) out.sign = { text: '검토 중', bg: '#ffe066', fg: '#2b2420' };
+    else if (last) out.sign = last.verdict === 'pass' ? { text: '통과 ✓', bg: '#2f9e44', fg: '#ffffff' }
+      : last.verdict === 'reject' ? { text: `${circled(last.nth || 1)} 반려`, bg: '#c92a2a', fg: '#ffffff' } : { text: '검토 끝', bg: '#495057', fg: '#ffffff' };
+    return out;
+  }
+  const circled = (n) => (n >= 1 && n <= 20 ? String.fromCharCode(0x2460 + n - 1) : `${n}.`);
+  function drawCounter(c, D, stamp) {
+    const { x, top, w, h } = D;
+    R(c, x + 3, top + h + 6, w - 2, 4, 'rgba(0,0,0,0.22)');
+    R(c, x, top, w, 8, '#e9e2d4'); R(c, x, top, w, 2, '#ffffff'); // 밝은 상판
+    R(c, x, top + 8, w, h - 2, '#4c6a8a'); R(c, x, top + 8, w, 2, '#3b5573'); R(c, x, top + h + 4, w, 2, '#2f4560');
+    R(c, x + 6, top + 13, w - 12, 1, '#5d7fa3');
+    if (D.mode === 'hall') { // 앞 명패 (좁은 칸에선 번호판 자리)
+      R(c, x + w / 2 - 14, top + 14, 28, 9, '#f1e6c8'); R(c, x + w / 2 - 12, top + 17, 24, 1, '#8a6040'); R(c, x + w / 2 - 12, top + 20, 18, 1, '#8a6040');
+    }
+    R(c, x + 4, top - 3, 10, 4, '#fffdf5'); R(c, x + 5, top - 5, 10, 2, '#eee6d6'); // 서류 더미
+    // 도장 (도장 찍는 순간 상판에 빨강 · 초록 자국)
+    R(c, x + w - 14, top - 7, 4, 5, '#5b3a22'); R(c, x + w - 16, top - 2, 8, 2, '#c92a2a');
+    if (stamp && stamp.r && stamp.q < 0.6) R(c, stamp.x - 5, top + 1, 10, 5, stamp.r.verdict === 'reject' ? '#e03131' : stamp.r.verdict === 'pass' ? '#2f9e44' : '#868e96');
+    // 번호판 기둥 + 판 (글은 위에 겹쳐 씀)
+    const S2 = D.sign;
+    if (D.mode === 'hall') { R(c, S2.x + S2.w / 2 - 1, S2.y + S2.h, 2, top + h + 6 - S2.y - S2.h, '#5b4330'); R(c, S2.x + S2.w / 2 - 5, top + h + 4, 10, 3, '#5b4330'); }
+    R(c, S2.x - 1, S2.y - 1, S2.w + 2, S2.h + 2, '#1a1512'); R(c, S2.x, S2.y, S2.w, S2.h, '#2b2420');
   }
 
   // 앉은 자세 · 표정
@@ -508,8 +787,19 @@
 
     const moves = new Map(), gone = new Set();
     for (const s of L.seats) { const r = motionOf(o, s, now); if (r.m) moves.set(s.key, r.m); if (r.gone) gone.add(s.key); }
-    const taken = new Set((o.shelf || []).filter((x) => now - x.at >= SHELF_MS * 0.46 && now - x.at < SHELF_MS + READ_MS).map((x) => slotOf(x.book)));
-    const readers = new Set((o.shelf || []).filter((x) => now - x.at >= SHELF_MS && now - x.at < SHELF_MS + READ_MS).map((x) => x.who));
+    // 심사대 장면: 심사대에 가 있는 직원은 자리에서 빼고(움직임도) 따로 그린다
+    const RV = reviewScene(o, now);
+    const away = (s) => !s.lead && !!s.worker && RV.hide.has(s.worker.id);
+    for (const s of L.seats) {
+      if (!s.worker || s.lead) continue;
+      if (RV.hide.has(s.worker.id)) moves.delete(s.key);
+      if (RV.gone.has(s.worker.id)) gone.add(s.key);
+    }
+    // 책장: 자리마다 거리가 달라 shelfMs 를 직접 계산한다
+    const shelfMsFor = (who) => { const seat = L.seats.find((s) => !!s.worker && (s.lead ? 'main' : s.worker.id) === who); return seat ? lenOf(toHall(seat, L.shelf.x + 40)) / (WALK_SPEED * 0.4) : 15000; };
+    const taken = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm * 0.46 && now - x.at < sm + READ_MS; }).map((x) => slotOf(x.book)));
+    const readers = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm && now - x.at < sm + READ_MS; }).map((x) => x.who));
+    if ((o.papers || []).some((p) => p.picked != null && now - p.picked >= PICK_WALK_MS && now - p.picked < PICK_MS + 1500)) readers.add('main'); // 주워 온 서류를 자리에서 펴 봄
 
     // 사장님 지시가 막 들어왔으면: 사장님이 문으로 들어와 팀장에게 지시서를 건네고 나간다
     let boss = null;
@@ -518,16 +808,31 @@
       const t = bAge / BOSS_MS, pts = bossPath();
       boss = t < 0.4 ? { pts, p: ease(t / 0.4), carry: 'doc' } : t < 0.58 ? { pts, p: 1, give: ease((t - 0.4) / 0.18) } : { pts, p: 1 - ease((t - 0.58) / 0.42) };
     }
+    // 자리를 이어받힌 앞사람: 새 사람이 앉아도 보고 → 문으로 끝까지 걸어 나간다 (퇴근 전 잠깐은 자리 옆에 선 채로)
+    const ghosts = [];
+    for (const s of L.seats) for (const lw of s.leaving || []) {
+      if (lw.ended == null) continue;
+      const r = motionOf(o, s, now, lw);
+      if (!r.gone) ghosts.push({ s, m: r.m || { pts: toDoor(s), p: 0 } });
+    }
     // 문은 누가 드나들 때만 열린다
     let doorOpen = false;
     const nearDoor = (m) => { const p = at(m.pts, m.p * lenOf(m.pts)); return p.x < L.doorCx + 40 && p.y < L.doorFoot + 34; };
+    for (const g of ghosts) if (nearDoor(g.m)) doorOpen = true;
     for (const m of moves.values()) if (nearDoor(m)) doorOpen = true;
+    for (const x of RV.walk) if (nearDoor(x.m)) doorOpen = true;
     if (boss && nearDoor(boss)) doorOpen = true;
     drawDoorBack(c, doorOpen);
     bossAt = null;
 
+    drawGroups(c);
     for (const s of L.seats) drawChair(c, s);
     const things = [{ foot: L.shelf.y + L.shelf.h, paint: () => drawShelf(c, taken, now) }, { foot: L.doorFoot + 1, paint: () => drawDoorFront(c) }];
+    // 놓친 일 서류: 팀장이 주워 들기 전까지 바닥에 (지나가는 사람이 위에 그려지게 발 높이 = 종이)
+    for (const x of paperSpots(o)) {
+      if (x.p.picked != null && now - x.p.picked >= PICK_WALK_MS * 0.5) continue;
+      things.push({ foot: x.y, paint: () => drawLost(c, x.x, x.y, frame) });
+    }
     // 걷는 사람 하나 (직원 · 팀장 · 사장님 같이 씀). 문 안쪽으로 들어가면 서서히 사라진다
     const walker = (m, look, expr, onAt) => {
       const len = lenOf(m.pts), pt = at(m.pts, m.p * len), walking = m.p > 0.001 && m.p < 0.999;
@@ -541,7 +846,7 @@
         if (fade === 1) shadowAt(c, pt.x, pt.y, 13);
         const holding = m.carry || m.give != null;
         const pose = m.give != null ? 'hand' : walking ? (holding ? 'carry' : 'walk') : holding ? 'carry' : 'idle';
-        sprite(c, look, pt.x, pt.y - (walking && step % 2 ? 1 : 0), { pose, frame: walking ? step : frame, facing: back ? 'back' : 'front',
+        sprite(c, look, pt.x, pt.y - (walking && step % 2 ? 1 : 0), { pose, frame: walking ? step : frame, facing: m.face || (back ? 'back' : 'front'),
           carry: m.carry === 'book' ? 'book' : 'doc', expr });
         c.globalAlpha = 1;
         if (m.give != null) {
@@ -553,7 +858,7 @@
     if (boss) walker(boss, 'boss', 'normal', (pt) => { bossAt = { x: pt.x, y: pt.y, talk: bAge / BOSS_MS < 0.6 }; });
     for (const s of L.seats) {
       const w = s.worker;
-      const present = !!w && !moves.has(s.key) && !gone.has(s.key) && w.status !== 'off' && !(s.lead && w.status === 'desk');
+      const present = !!w && !moves.has(s.key) && !gone.has(s.key) && !away(s) && w.status !== 'off' && !(s.lead && w.status === 'desk');
       const reading = !!w && readers.has(s.lead ? 'main' : w.id);
       things.push({ foot: s.deskBottom, paint: () => {
         if (present) {
@@ -567,6 +872,20 @@
       } });
       const m = moves.get(s.key);
       if (m) walker(m, lookOf(s.job), exprOf(pctOf(fillOf(s)), null, now));
+      for (const g of ghosts) if (g.s === s) walker(g.m, lookOf(s.job), 'happy');
+    }
+    // 심사대: 카운터 · 앉은 검사 직원 · 줄 선 직원 · 오가는 사람
+    if (L.desk) {
+      const D = L.desk;
+      things.push({ foot: D.top + D.h + 6, paint: () => drawCounter(c, D, RV.stamp) });
+      for (const st of RV.sit) {
+        const ss = seatOfId(st.w.id);
+        things.push({ foot: D.seatFoot, paint: () => sprite(c, lookOf(ss ? ss.job : 'QA'), st.x, D.seatFoot, { pose: st.pose, frame, expr: st.expr }) });
+      }
+      for (const x of RV.walk) {
+        const ss = seatOfId(x.w.id);
+        walker(x.back ? { ...x.m, face: 'back' } : x.m, x.look || lookOf(ss ? ss.job : 'QA'), x.expr || 'normal');
+      }
     }
     things.sort((a, b) => a.foot - b.foot);
     for (const t of things) t.paint();
@@ -576,7 +895,7 @@
       c.fillStyle = 'rgba(14,20,48,0.42)'; c.fillRect(0, 0, L.W, L.H);
       c.globalCompositeOperation = 'lighter';
       for (const s of L.seats) {
-        if (!s.worker || moves.has(s.key) || gone.has(s.key) || s.worker.status === 'off' || (s.lead && s.worker.status === 'desk')) continue;
+        if (!s.worker || moves.has(s.key) || gone.has(s.key) || away(s) || s.worker.status === 'off' || (s.lead && s.worker.status === 'desk')) continue;
         const lx = s.cx - (s.lead ? 48 : 40) + 6, ly = s.sy + 60;
         const g = c.createRadialGradient(lx, ly, 2, lx, ly, 52);
         g.addColorStop(0, 'rgba(255,200,120,0.42)'); g.addColorStop(1, 'rgba(255,200,120,0)');
@@ -589,21 +908,27 @@
     for (const a of o.assigns || []) {
       const age = now - a.at;
       if (age < 0 || age >= ASSIGN_MS) continue;
-      const s = L.seats.find((x) => x.worker && x.worker.id === a.to) || L.seats.find((x) => x.members && x.members.some((mm) => mm.id === a.to));
+      const s = L.seats.find((x) => x.worker && x.worker.id === a.to) || L.seats.find((x) => !x.lead && x.members && x.members.some((mm) => mm.id === a.to));
       if (!s) continue;
       const q = ease(age / ASSIGN_MS), x0 = L.lead.cx - 20, y0 = L.lead.sy + 64, x1 = s.cx - 4, y1 = s.sy + 66;
       paper(c, x0 + (x1 - x0) * q, y0 + (y1 - y0) * q - Math.sin(q * Math.PI) * 40);
+    }
+
+    // 심사대에서 도장 찍은 서류: 반려(빨강)는 만든 직원에게, 통과(초록)는 팀장에게
+    for (const pp of RV.papers) {
+      const x = pp.x0 + (pp.x1 - pp.x0) * pp.q, y = pp.y0 + (pp.y1 - pp.y0) * pp.q - Math.sin(pp.q * Math.PI) * 26;
+      paper(c, x, y); R(c, x, y, 10, 2, pp.col === '#fffdf5' ? '#adb5bd' : pp.col === '#ffc9c9' ? '#e03131' : '#2f9e44');
     }
 
     // 확대해서 화면에 (픽셀 그대로)
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(world, 0, 0, L.W * sd, L.H * sd);
-    overlay(now, moves, gone);
+    overlay(now, moves, gone, RV);
   }
 
   // ---- 글자 (기기 해상도로 또렷하게): 말풍선 · 이름표 · 표지 ----
-  function overlay(now, moves, gone) {
+  function overlay(now, moves, gone, RV) {
     const fs = Math.round(dpr * clamp(9 + (sd / dpr) * 1.6, 11, 15));
     ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
     hits = [];
@@ -644,11 +969,35 @@
     const lines = [];
     const o = snap.office;
     lines.push(['#c92a2a', 700, o.prompt ? `📌 ${o.prompt}` : '📌 사장님 지시 기다리는 중']);
-    if (o.todos && o.todos.length) for (const t of o.todos) lines.push([t.state === 'done' ? '#8a939c' : t.state === 'doing' ? '#1864ab' : '#343a40', t.state === 'doing' ? 700 : 500, `${t.state === 'done' ? '☑' : t.state === 'doing' ? '▶' : '☐'} ${t.text}`]);
+    const KB = snap.board; // 칸반: 단계(대기 · 진행 · 완료 · 반려)를 알 수 있을 때만 (패널 office.ts boardOf). 모르면 아래 할 일 목록
+    if (KB && KB.length) {
+      ctx.font = `700 ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+      ctx.fillStyle = '#c92a2a';
+      let tx0 = lines[0][2]; while (tx0.length > 3 && ctx.measureText(tx0).width > X(B.w - 6)) tx0 = tx0.slice(0, -2) + '…';
+      ctx.fillText(tx0, X(B.x + 3), Y(B.y) + bfs * 0.75);
+      const cw = B.w / KB.length, top = Y(B.y) + bfs * 1.55 + Math.max(Math.round(8 * dpr), Math.round(bfs * 0.85)) * 0.55, sfs = Math.max(Math.round(8 * dpr), Math.round(bfs * 0.85)), lh2 = sfs * 1.2;
+      const HEAD = { 대기: '#495057', 진행: '#1864ab', 완료: '#2b8a3e', 반려: '#c92a2a' };
+      KB.forEach((col, i) => {
+        const x = X(B.x + i * cw);
+        if (i) R(ctx, x, top - sfs * 0.6, dpr, Y(B.y + B.h) - top + sfs * 0.6, '#ced4da'); // 칸 나눔 선
+        ctx.font = `700 ${sfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        ctx.fillStyle = HEAD[col.name] || '#343a40';
+        ctx.fillText(`${col.name} ${col.cards.length}`, x + 2 * dpr, top);
+        const room2 = Math.max(0, Math.floor((Y(B.y + B.h) - top - lh2 * 0.6) / lh2));
+        ctx.font = `500 ${sfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        col.cards.slice(0, room2).forEach((cd, j) => {
+          let t = (cd.loop ? `⟳${cd.loop} ` : '') + cd.text;
+          while (t.length > 2 && ctx.measureText(t).width > X(cw) - 4 * dpr) t = t.slice(0, -2) + '…';
+          ctx.fillStyle = col.name === '반려' ? '#c92a2a' : col.name === '완료' ? '#868e96' : '#343a40';
+          ctx.fillText(t, x + 2 * dpr, top + lh2 * (j + 1));
+        });
+      });
+      lines.length = 0;
+    } else if (o.todos && o.todos.length) for (const t of o.todos) lines.push([t.state === 'done' ? '#8a939c' : t.state === 'doing' ? '#1864ab' : '#343a40', t.state === 'doing' ? 700 : 500, `${t.state === 'done' ? '☑' : t.state === 'doing' ? '▶' : '☐'} ${t.text}`]);
     else for (const u of snap.units || []) { const ws = u.members.map((m) => m.status); const dn = ws.filter((x) => x === 'done').length;
       lines.push(['#343a40', 500, `• ${u.key} ${dn}/${ws.length} 끝`]); }
     const lh = bfs * 1.22, maxLines = Math.max(1, Math.floor((Y(B.h) - bfs * 0.6) / lh));
-    let shown = lines.length > maxLines ? lines.filter((l, i) => i === 0 || l[0] !== '#8a939c').slice(0, maxLines) : lines;
+    const shown = lines.length > maxLines ? lines.filter((l, i) => i === 0 || l[0] !== '#8a939c').slice(0, maxLines) : lines;
     shown.forEach(([col, wt, text], i) => {
       ctx.font = `${wt} ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
       let tx = text; while (tx.length > 3 && ctx.measureText(tx).width > X(B.w - 6)) tx = tx.slice(0, -2) + '…';
@@ -658,24 +1007,59 @@
     }
 
     // 말풍선: 줄마다 옆자리와 겹치지 않게 (옆이 비면 넓게, 좁으면 짧은 말)
+    // 페르소나(맡긴 일에서 입힌 성격)는 상태 말풍선 왼쪽에 작은 빨간 말풍선으로 나란히 — 위로 쌓으면 윗줄 이름표와 겹친다
     const rows = new Map();
     for (const s of L.seats) rows.set(s.sy, (rows.get(s.sy) || []).concat([s]));
+    const qfs = Math.round(fs * 0.74);
+    boxes.bubbles = []; boxes.tags = []; // 말풍선이 차지한 곳 (그림자 · 꼬리까지, 기기 픽셀): 묶음 글이 피해 간다
     for (const row of rows.values()) {
       row.sort((a, b) => a.cx - b.cx);
-      const say = (s) => (s.worker && !gone.has(s.key) && !moves.has(s.key) ? bubbleOf(s.worker) : null);
+      const off = (s) => gone.has(s.key) || moves.has(s.key) || (!s.lead && !!s.worker && RV.hide.has(s.worker.id)); // 심사대에 가 있으면 자리 말풍선 없음
+      const say = (s) => (s.worker && !off(s) ? bubbleOf(s.worker) : null);
+      const persona = (s) => (!s.lead && s.worker && s.worker.persona && !off(s) ? s.worker.persona : null);
+      const busy = (s) => !!(say(s) || persona(s));
       row.forEach((s, i) => {
-        const b = say(s);
-        if (!b || !b.long) return;
+        const b0 = say(s), b = b0 && b0.long ? b0 : null, pz = persona(s);
+        if (!b && !pz) return;
         const prev = row[i - 1], next = row[i + 1];
-        const lo = prev ? (say(prev) ? prev.cx + SLOT_W / 2 : prev.cx) : 0;
-        const hi = next ? (say(next) ? next.cx - SLOT_W / 2 : next.cx) : L.W;
+        const lo = prev ? (busy(prev) ? prev.cx + SLOT_W / 2 : prev.cx) : 0;
+        const hi = next ? (busy(next) ? next.cx - SLOT_W / 2 : next.cx) : L.W;
+        let room = X(hi - lo) - fs;
+        // 페르소나 몫 먼저 (상태 말풍선이 있으면 자리의 절반까지만)
+        const gap = 3 * dpr, pph = qfs * 1.6;
+        let ptext = null, ppw = 0;
+        if (pz) {
+          ctx.font = `700 ${qfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          const cap = b ? room * 0.5 : room;
+          let inner = pz, cut = false;
+          const pt = () => `"${inner}${cut ? '…' : ''}"`;
+          while (inner.length > 2 && ctx.measureText(pt()).width + qfs > cap) { inner = inner.slice(0, -1); cut = true; }
+          ptext = pt(); ppw = ctx.measureText(ptext).width + qfs;
+          room -= ppw + gap;
+        }
+        let text = null, pw = 0;
+        const ph = fs * 1.7;
+        if (b) {
+          ctx.font = `600 ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          text = ctx.measureText(b.long).width <= room ? b.long : b.short;
+          while (text.length > 2 && ctx.measureText(text).width > room) text = text.slice(0, -2) + '…';
+          pw = ctx.measureText(text).width + fs * 1.1;
+        }
+        const total = pw + (ptext ? ppw + (b ? gap : 0) : 0);
+        const left = clamp(X(s.cx) - total / 2, X(lo), X(hi) - total);
+        if (ptext) {
+          const px = left, py = Y(s.sy + 12) - pph / 2, red = '#c92a2a';
+          ctx.fillStyle = 'rgba(0,0,0,0.18)'; roundRect(ctx, px + dpr, py + 2 * dpr, ppw, pph, pph / 2.4); ctx.fill();
+          ctx.fillStyle = red; roundRect(ctx, px, py, ppw, pph, pph / 2.4); ctx.fill();
+          const tx = clamp(X(s.cx), px + pph / 2, px + ppw - pph / 2);
+          ctx.beginPath(); ctx.moveTo(tx - 3 * dpr, py + pph - dpr); ctx.lineTo(tx, py + pph + 5 * dpr); ctx.lineTo(tx + 3 * dpr, py + pph - dpr); ctx.fill();
+          boxes.bubbles.push({ x: px, y: py, w: ppw + dpr, h: pph + 2 * dpr }, { x: tx - 3 * dpr, y: py + pph, w: 6 * dpr, h: 5 * dpr });
+          ctx.font = `700 ${qfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(ptext, px + ppw / 2, py + pph / 2 + dpr * 0.5);
+        }
+        if (!b) return;
         ctx.font = `600 ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
-        const room = X(hi - lo) - fs;
-        let text = ctx.measureText(b.long).width <= room ? b.long : b.short;
-        while (text.length > 2 && ctx.measureText(text).width > room) text = text.slice(0, -2) + '…';
-        const tw = ctx.measureText(text).width, pw = tw + fs * 1.1, ph = fs * 1.7;
-        let bx = X(s.cx) - pw / 2;
-        bx = clamp(bx, X(lo), X(hi) - pw);
+        const bx = left + (ptext ? ppw + gap : 0);
         const by = Y(s.sy + 12) - ph / 2;
         const st = s.worker.status;
         const accent = st === 'done' ? '#2f9e44' : st === 'unfinished' ? '#c9423a' : st === 'ask' ? '#e07a3a' : st === 'work' ? '#1971c2' : '#8a7f74';
@@ -685,32 +1069,115 @@
         const tx = clamp(X(s.cx), bx + ph / 2, bx + pw - ph / 2);
         ctx.fillStyle = '#fffdf8'; ctx.beginPath(); ctx.moveTo(tx - 4 * dpr, by + ph - dpr); ctx.lineTo(tx, by + ph + 6 * dpr); ctx.lineTo(tx + 4 * dpr, by + ph - dpr); ctx.fill();
         ctx.strokeStyle = accent; ctx.beginPath(); ctx.moveTo(tx - 4 * dpr, by + ph); ctx.lineTo(tx, by + ph + 6 * dpr); ctx.lineTo(tx + 4 * dpr, by + ph); ctx.stroke();
+        // 테두리 굵기(1.5) 반 · 그림자(아래 2) · 꼬리(아래 6)까지 말풍선 몫
+        boxes.bubbles.push({ x: bx - dpr, y: by - dpr, w: pw + 2 * dpr, h: ph + 3 * dpr }, { x: tx - 5 * dpr, y: by + ph, w: 10 * dpr, h: 7 * dpr });
         ctx.fillStyle = '#2b2420'; ctx.textAlign = 'center'; ctx.fillText(text, bx + pw / 2, by + ph / 2 + dpr * 0.5);
       });
     }
     // 이름표 (자리 가운데) + 누를 자리
+    // 묶음 글: 나란히 앉은 같은 일 「같은 일 ×4」 · 파트 줄 「▸ 개발자 파트 · 3명」 (밝은 글 + 진한 바탕 — 바닥 위에서도 읽히게)
+    const gfs = Math.round(fs * 0.72);
+    ctx.textAlign = 'left';
+    const tag = (text, x, y, bgc, fg, dodge) => {
+      ctx.font = `700 ${gfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+      const w = ctx.measureText(text).width + gfs * 0.8, h = gfs * 1.45;
+      // 말풍선(모서리 · 그림자 · 꼬리)과 겹치면 그 아래로 비켜 쓴다 (테두리 반 + 1픽셀 띄움)
+      const hit = (b, yy) => x - dpr < b.x + b.w && b.x < x + w + dpr && yy - h / 2 - dpr < b.y + b.h && b.y < yy + h / 2 + dpr;
+      for (let k = 0; dodge && k < 4; k++) { const b = boxes.bubbles.find((bb) => hit(bb, y)); if (!b) break; y = b.y + b.h + h / 2 + 2 * dpr; }
+      boxes.tags.push({ x: x - dpr / 2, y: y - h / 2 - dpr / 2, w: w + dpr, h: h + dpr, text });
+      ctx.fillStyle = bgc; roundRect(ctx, x, y - h / 2, w, h, h / 2); ctx.fill();
+      ctx.strokeStyle = fg; ctx.lineWidth = dpr; ctx.stroke();
+      ctx.fillStyle = fg; ctx.fillText(text, x + gfs * 0.4, y + dpr * 0.5);
+    };
+    const tagged = new Set();
+    for (const g of twinGroups()) {
+      if (tagged.has(g.k)) continue; // 줄이 바뀐 묶음은 첫 줄에만
+      tagged.add(g.k);
+      tag(`같은 일 ×${L.seats.filter((x) => x.kind === 'twin' && x.pick === g.k).length}`, X(g.x0 + 4), Y(g.sy + 28), '#0b5c52', '#ffffff', true);
+    }
+    for (const g of partGroups()) {
+      const n = g.seats.reduce((a, x) => a + (x.members ? x.members.length : 1), 0);
+      tag(`▸ ${g.k} 파트 · ${n}명`, X(g.x0 + 6), Y(g.sy - PART_PAD / 2 + 1), '#2b1f4f', '#ffe9a8');
+    }
+    ctx.textAlign = 'center';
     for (const s of L.seats) {
-      const isSel = s.key === sel, away = gone.has(s.key);
-      const name = (s.count > 1 && !s.team ? `${s.name} ×${s.count}` : s.name) + (away ? ' 퇴근' : '');
-      // 이름표 밑 작은 피로도 캡슐 (직원마다 따로)
+      // 심사대에 가 있는 동안(검사 · 줄 서기)은 원래 자리 이름표를 흐리게, 배지 · 피로도 · ⟳ 는 안 그린다 (심사대 쪽에 보인다)
+      const atDesk = !s.lead && !!s.worker && RV.hide.has(s.worker.id), walking = moves.has(s.key);
+      const isSel = (s.pick || s.key) === sel, away = gone.has(s.key) || atDesk;
+      const name = (s.count > 1 && !s.team && s.kind !== 'fold' ? `${s.name} ×${s.count}` : s.name) + (atDesk ? ' · 심사대' : gone.has(s.key) ? ' 퇴근' : ''); // 심사대 앞에 가 있으면 (반려 뒤 줄 서기 포함) 늘 「· 심사대」
+      // 직급 배지: 이름표 오른쪽 같은 줄에 (밑에 두면 아랫줄 말풍선과 겹친다). 1배에서도 읽히는 크기, 자리 폭에 안 들어가면 별만,
+      // 그래도 안 들어가면 안 그린다 (이름표 밑은 아랫줄 말풍선 자리, 책상 위는 그림을 가림). 페르소나가 있으면 빨간 테두리
+      const tier = !s.lead && !away && s.worker ? TIER[s.worker.tier] : null;
+      const nfont = `${isSel || s.lead ? 700 : 500} ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+      ctx.font = nfont;
+      const pw0 = ctx.measureText(name).width + fs * 0.9, room = X(SLOT_W) - 6 * dpr, gap = 3 * dpr;
+      const bfs = Math.max(Math.round(10 * dpr), Math.round(fs * 0.68));
+      let badge = null;
+      if (tier) {
+        ctx.font = `700 ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        const wOf = (t) => ctx.measureText(t).width + bfs;
+        const full = `${tier.stars} ${tier.name}`;
+        const text = pw0 + gap + wOf(full) <= room ? full : tier.stars;
+        badge = pw0 + gap + wOf(text) <= room ? { text, w: wOf(text), inline: true } : null; // 별도 안 들어가면 안 그림 (카드에서 봄)
+      }
+      const shift = badge && badge.inline ? (badge.w + gap) / 2 : 0, ny = Y(s.sy + 115);
+      const pw = label(name, X(s.cx) - shift, ny, isSel
+        ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, border: '#fff3d6' }
+        : { bg: away ? 'rgba(43,36,32,.45)' : 'rgba(43,36,32,.82)', fg: away ? '#a99f95' : '#f3ead9', bold: s.lead });
+      let below = ny + fs * 0.75; // 이름표 아래 끝
+      if (badge) {
+        const bh = bfs * 1.45, bx = X(s.cx) - shift + pw / 2 + gap, by = ny - bh / 2;
+        ctx.font = `700 ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        ctx.fillStyle = tier.bg; roundRect(ctx, bx, by, badge.w, bh, bh / 2); ctx.fill();
+        if (s.worker.persona) { ctx.strokeStyle = '#ff4d4f'; ctx.lineWidth = 1.5 * dpr; ctx.stroke(); }
+        ctx.fillStyle = tier.fg; ctx.fillText(badge.text, bx + badge.w / 2, by + bh / 2 + dpr * 0.5);
+      }
+      // 그 밑 작은 피로도 캡슐 (직원마다 따로)
       const fp = !away ? pctOf(fillOf(s)) : null;
       if (fp != null && s.worker && s.worker.status !== 'desk' && s.worker.status !== 'off') {
-        const bw = 30 * dpr, bh = 4 * dpr, bx = X(s.cx) - bw / 2, by = Y(s.sy + 115) + fs * 0.95;
+        const bw = 30 * dpr, bh = 4 * dpr, bx = X(s.cx) - bw / 2, by = below + fs * 0.2;
         ctx.fillStyle = 'rgba(26,21,18,.85)'; roundRect(ctx, bx - dpr, by - dpr, bw + 2 * dpr, bh + 2 * dpr, bh); ctx.fill();
         ctx.fillStyle = stageOf(fp)[2]; roundRect(ctx, bx, by, Math.max(bh, (bw * Math.min(100, fp)) / 100), bh, bh / 2); ctx.fill();
       }
-      label(name, X(s.cx), Y(s.sy + 115), isSel
-        ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, border: '#fff3d6' }
-        : { bg: away ? 'rgba(43,36,32,.45)' : 'rgba(43,36,32,.82)', fg: away ? '#a99f95' : '#f3ead9', bold: s.lead });
+      // 다시 하는 횟수 ⟳n (반려 · 같은 일 다시 맡김) · 파트장 표시 (그 아래 사람 수)
+      if (s.loop && !away && !walking) label(`⟳${s.loop}`, X(s.cx + 34), Y(s.sy + 36), { bg: '#c92a2a', fg: '#ffffff', bold: true, size: gfs });
+      if (s.kids && !away) label('파트장', X(s.cx + 28), Y(s.sy + 52), { bg: '#2b1f4f', fg: '#ffe9a8', bold: true, size: gfs, border: '#ffe9a8' }); // 몇 명인지는 아래 파트 띠에
       if (s.team && s.members) {
         const dn = s.members.filter((m) => m.status === 'done').length;
         ctx.font = `700 ${Math.round(fs * 0.62)}px -apple-system, "Apple SD Gothic Neo", sans-serif`; ctx.fillStyle = '#ffd89b';
         ctx.fillText(`${dn}/${s.members.length} 끝`, X(s.cx), Y(s.sy + 43.5));
       }
-      hits.push({ key: s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
+      hits.push({ key: s.pick || s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
     }
     hits.push({ key: '__shelf', x: L.shelf.x, y: L.shelf.y, w: L.shelf.w, h: L.shelf.h + 20 }); // 책장 누르면 스킬 목록
-    hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 펼치기 · 접기
+    // 심사대: 번호판 글 · 「+n」(못 앉은 검사 직원) · 「대기 n」 · 표지. 누르면 심사대 카드
+    if (L.desk) {
+      const D = L.desk, S2 = D.sign, sfs = Math.round(fs * 0.72);
+      if (RV.sign) {
+        ctx.font = `700 ${sfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        const tw = ctx.measureText(RV.sign.text).width + sfs * 0.8, bw = Math.max(X(S2.w), tw), bh = Math.max(Y(S2.h), sfs * 1.4);
+        const bx = X(S2.x + S2.w / 2) - bw / 2, by = Y(S2.y + S2.h / 2) - bh / 2;
+        ctx.fillStyle = RV.sign.bg; roundRect(ctx, bx, by, bw, bh, 3 * dpr); ctx.fill();
+        ctx.fillStyle = RV.sign.fg; ctx.fillText(RV.sign.text, bx + bw / 2, by + bh / 2 + dpr * 0.5);
+      }
+      if (RV.more > 0) label(`+${RV.more}`, X(D.x + D.w - 6), Y(D.seatFoot - 58), { bg: '#1971c2', fg: '#ffffff', bold: true, size: sfs });
+      if (RV.wait > 3 || (D.mode === 'grid' && RV.wait > 0)) label(`대기 ${RV.wait}`, X(D.mode === 'hall' ? D.x + 52 : D.x + 18), Y(D.mode === 'hall' ? D.qy - 70 : D.top + 14), { bg: '#e8590c', fg: '#ffffff', bold: true, size: sfs });
+      const sel2 = sel === '__review';
+      // 이름표는 카운터 왼쪽 아래 끝 (앞에 줄 선 사람 몸과 안 겹치게)
+      if (D.mode === 'hall') label('심사대', X(D.x - 8), Y(D.top + D.h + 4), sel2 ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, size: sfs } : { bg: 'rgba(43,36,32,.75)', fg: '#ffd89b', size: sfs });
+      else label('심사대', X(D.cx), Y(D.sy + 115), sel2 ? { bg: '#ffd89b', fg: '#2a1d05', bold: true } : { bg: 'rgba(43,36,32,.82)', fg: '#f3ead9' });
+      // 심사대에 앉은 검사 직원: 직급 배지 · 페르소나를 머리 위에 (원래 자리 대신 여기서 보인다)
+      for (const st of RV.sit) {
+        const t = TIER[st.w.tier], bfs2 = Math.max(Math.round(10 * dpr), Math.round(fs * 0.68));
+        let y = Y(D.seatFoot - 70);
+        if (t) { label(t.stars, X(st.x), y, { bg: t.bg, fg: t.fg, bold: true, size: bfs2, border: st.w.persona ? '#ff4d4f' : null }); y -= bfs2 * 1.7; }
+        if (st.w.persona) label(`"${st.w.persona.length > 10 ? st.w.persona.slice(0, 9) + '…' : st.w.persona}"`, X(st.x), y, { bg: '#c92a2a', fg: '#ffffff', bold: true, size: Math.round(fs * 0.74) });
+      }
+      hits.push(D.mode === 'hall' ? { key: '__review', x: D.x - 10, y: S2.y - 4, w: D.w + 56, h: D.qy - S2.y + 6 } : { key: '__review', x: D.sx, y: D.sy + 4, w: SLOT_W, h: ROW_H - 4 });
+    }
+    hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 옆에 소식 전체 목록 (책장처럼)
+    // 바닥 서류는 자리보다 먼저 (자리 칸 위에 떨어져 있어도 서류가 눌린다)
+    for (const x of paperSpots(snap.office)) if (x.p.picked == null) hits.unshift({ key: '__paper:' + x.p.id, x: x.x - 4, y: x.y - 24, w: 22, h: 30 });
   }
   function roundRect(c, x, y, w, h, r) {
     c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
@@ -776,8 +1243,8 @@
   }
 
   const spark = [];
-  // ---- 책장 밑 「사무실 소식」 게시판: 모두의 '한 일' 을 시간순으로 (접으면 3줄, 누르면 10줄) ----
-  let allEv = [], newsOpen = false, lastNews = '', seenNews = new Set();
+  // ---- 책장 밑 「사무실 소식」 게시판: 모두의 '한 일' 을 시간순으로 (게시판엔 3줄, 누르면 옆 카드에 전체) ----
+  let allEv = [], lastNews = '', seenNews = new Set(), newsDrop = false;
   function timeline() {
     const o = snap.office, ev = [];
     for (const [at2, x] of o.lead.recent || []) ev.push([at2, '팀장', x]);
@@ -785,22 +1252,23 @@
     ev.sort((a, b) => b[0] - a[0]);
     allEv = ev;
     news();
+    if (sel === '__news') card();
   }
   function news() {
     const box = $('news');
     if (!box || !L || !L.news) return;
     const N = L.news, k = sd / dpr, x = (canvas.offsetLeft || 0) + N.x * k, y = (canvas.offsetTop || 0) + N.y * k;
-    const n = newsOpen ? 10 : 3;
-    const top = allEv.slice(0, n);
-    const key = newsOpen + '|' + top.map((e) => e[0] + e[2]).join('|');
-    box.className = newsOpen ? 'open' : '';
-    // 접으면 게시판 코르크판 안에, 펼치면 게시판 오른쪽 위에 맞춰 넓은 종이로
-    const w = newsOpen ? Math.max(320, N.w * k) : N.w * k;
-    box.style.width = w + 'px';
-    box.style.left = (newsOpen ? x + N.w * k - w : x) + 'px';
+    const top = allEv.slice(0, 3);
+    const on = sel === '__news';
+    const key = on + '|' + top.map((e) => e[0] + e[2]).join('|');
+    box.className = on ? 'on' : '';
+    box.style.width = N.w * k + 'px';
+    box.style.left = x + 'px';
     box.style.top = y + 'px';
-    box.style.height = newsOpen ? 'auto' : N.h * k + 'px';
-    $('newsTog').textContent = newsOpen ? '▴ 접기' : '▾ 10줄';
+    box.style.height = N.h * k + 'px';
+    // 게시판이 좁으면 머리 글을 줄인다 (오른쪽 밖으로 잘리지 않게)
+    const tight = N.w * k < 160;
+    $('newsTog').textContent = on ? (tight ? '◂' : '◂ 보는 중') : allEv.length > 3 ? (tight ? `▸ ${allEv.length}` : `▸ 전체 ${allEv.length}`) : '▸ 보기';
     if (key === lastNews) return;
     lastNews = key;
     $('newsList').innerHTML = top.length ? top.map((e) => {
@@ -809,7 +1277,24 @@
     }).join('') : '<div>아직 소식이 없어요</div>';
     for (const e of allEv.slice(0, 30)) seenNews.add(e[0] + e[2]);
   }
-  $('news').addEventListener('click', () => { newsOpen = !newsOpen; news(); });
+  // 소식 카드: 모두의 '한 일' 전체를 최신 순으로 (열 때만 주르륵, 새 소식은 맨 위에 하나씩)
+  function newsCard() {
+    const list = allEv.slice(0, 60), now = Date.now(), wasDrop = newsDrop;
+    const rows = list.map((e, n) => {
+      const id = e[0] + e[2];
+      const first = seenCard.get(id);
+      const cls = newsDrop ? 'srow' : 'srow still' + (first === undefined || now - first < 4000 ? ' fresh' : '');
+      return `<div class="${cls}" style="--i:${Math.min(n, 20)}"><div class="sname"><b>${esc(e[1])}</b><span class="role">${hhmm(e[0])}</span></div><div class="snote">${esc(e[2])}</div></div>`;
+    });
+    for (const e of list) if (!seenCard.has(e[0] + e[2])) seenCard.set(e[0] + e[2], wasDrop ? 0 : now); // 새 소식은 4초 동안 노랗게
+    newsDrop = false;
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📋 사무실 소식</h2><div class="kind">팀장과 직원들이 한 일을 최신 순으로 모아 봐요</div></div></div>` +
+      `<h3>소식 ${allEv.length}개${allEv.length > list.length ? ` <span style="font-weight:400">— 최근 ${list.length}개만</span>` : ''}</h3>` +
+      (rows.length ? rows.join('') : '<div class="row">아직 소식이 없어요 — 일을 시키면 여기에 쌓여요</div>');
+  }
+  const seenCard = new Map();
+  const openNews = () => { const was = !!sel; sel = sel === '__news' ? null : '__news'; if (sel) newsDrop = true; card(); news(); if (was !== !!sel) refit(); };
+  $('news').addEventListener('click', () => openNews());
 
   // ---- 카드 (누른 직원 · 팀) ----
   // 책장 카드: 스킬 목록이 주르륵 (방금 쓴 책 → 내 스킬 → 플러그인은 더 보기)
@@ -839,8 +1324,56 @@
       <div class="row"><b>걸린 시간</b>${r.mins}분 · 자리 ${r.units.length}개 (직원 ${people}명) · 서류 ${r.papers}장 · 실패 ${r.fails}번</div>
       <div class="row"><b>전기세</b>${man(r.tokens)}${r.top ? ` · 제일 많이 쓴 자리: ${esc(r.top)}` : ''}</div>
       <ul>${r.units.map((u) => `<li><b>${esc(u.key)}</b>${u.people > 1 ? ` (${u.people}명)` : ''} — ${u.mins}분 · 서류 ${u.papers}장${u.fails ? ` · 실패 ${u.fails}번` : ''}${u.tokens ? ` · ${man(u.tokens)}` : ''}</li>`).join('')}</ul>
+      ${(r.reviews || []).length ? `<h3>검사 결과</h3><ul>${r.reviews.map((x) => `<li><b>${esc(x.by)}</b> → ${reviewText(x)}</li>`).join('')}</ul>` : ''}
       <div class="note">▶ 다시 보기: Claude Code 옆 패널에서 「📋 보고서 · ▶ 다시 보기」 를 누르면 방금 일이 4배 빠르게 다시 돌아요 — 이 화면에도 같이 보여요 (토큰 0).</div>`;
   }
+  // 🔍 심사대: 지금 검토 중 · 대기 줄 · 최근 결과와 반려 이유 (이유는 검사 직원이 남긴 글에서 뽑을 수 있을 때만)
+  const reviewText = (r) => {
+    const what = r.unit ? `${r.unit} 서류` : '서류';
+    if (r.verdict === 'pass') return `<span style="color:#2f9e44;font-weight:700">통과 ✓</span> ${esc(what)}`;
+    if (r.verdict === 'reject') return `<span style="color:#c92a2a;font-weight:700">${r.nth > 1 ? `${r.nth}번째 반려` : '반려'} ✗</span> ${esc(what)}${r.reason ? `<br><span style="color:#8a7f74">이유: ${esc(r.reason)}</span>` : ''}`;
+    return `<span style="font-weight:700">검토 끝</span> ${esc(what)} <span style="color:#8a7f74">(통과 · 반려를 글에서 못 찾음)</span>`;
+  };
+  function reviewCard() {
+    const o = snap.office, now = Date.now(), ws = o.workers || [];
+    const RV = reviewScene(o, now), from = (o.promptAt || 0) - 1000;
+    const name = (id) => { const w = ws.find((x) => x.id === id); return w ? unitName(w) + (w.member ? ' ' + w.member : '') : '?'; };
+    const busy = reviewersOf(o).filter((w) => w.ended == null);
+    const nowRows = busy.map((w) => `<li><b>${esc(name(w.id))}</b> — ${w.reviewOf ? `${esc(name(w.reviewOf))} 서류` : '서류'} 검토 중 · ${ago(now - w.started)}째<br><span style="color:#8a7f74">${esc(w.task || '')}</span></li>`);
+    const line = busy.filter((w) => w.reviewOf).map((w, i) => `<li><b>${i + 1}</b> ${esc(name(w.reviewOf))} — ${esc((ws.find((x) => x.id === w.reviewOf) || {}).task || '')}</li>`);
+    const done = (o.reviews || []).filter((r) => r.at >= from).slice(-8).reverse();
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>🔍 심사대</h2><div class="kind">검사 직원이 남이 한 일을 보고 통과 · 반려를 정해요</div></div></div>` +
+      `<h3>지금 검토 중 ${busy.length}명${RV.more ? ` <span style="font-weight:400">— 심사대엔 2명만 앉고 +${RV.more}</span>` : ''}</h3>` +
+      (nowRows.length ? `<ul>${nowRows.join('')}</ul>` : '<div class="row">지금은 없어요</div>') +
+      `<h3>대기 줄 ${line.length}명</h3>` + (line.length ? `<ul>${line.join('')}</ul>` : '<div class="row">줄 선 사람 없어요</div>') +
+      `<h3>최근 결과</h3>` + (done.length ? `<ul>${done.map((r) => `<li><time>${hhmm(r.at)}</time><b>${esc(name(r.by))}</b> → ${reviewText(r)}</li>`).join('')}</ul>` : '<div class="row">아직 없어요</div>') +
+      '<div class="note">검사 직원: 에이전트 종류 이름에 review · critic · verifier · judge 가 있거나, 맡긴 일이 검토 · 리뷰 · 심사 · 검증인 직원. QA 는 테스트를 돌리는 게 기본이라, 맡긴 일에 검토 · 리뷰 · 승인이 있을 때만 검사 직원으로 봐요.<br>' +
+      '검사 받는 직원은 검사 직원이 출근하기 직전에 일을 끝낸 직원으로 짐작해요. 통과 · 반려는 검사 직원이 남긴 마지막 글에서 뽑고, 애매하면 「검토 끝」 으로만 보여요.</div>';
+  }
+
+  // 📄 놓친 일 서류: 누르면 패널에 「주워 와」 를 전한다 (serve.py /api/pick → 패널이 팀장을 걸려 보내고 입력창에 문장).
+  // 패널에 못 전하면(서버가 예전 것 · 패널이 꺼짐) 문장을 카드에 보여 주고 복사 단추로
+  const picks = new Map(); // 서류 id → 'sending' · 'sent' · 'fail'
+  function pick(id) {
+    if (picks.get(id) === 'sending' || picks.get(id) === 'sent') return;
+    picks.set(id, 'sending');
+    fetch('/api/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: (snap && snap.session) || 'session', id }) })
+      .then((r) => r.json()).then((d) => picks.set(id, d && d.ok ? 'sent' : 'fail'), () => picks.set(id, 'fail')).then(() => { if (sel === '__paper:' + id) card(); });
+  }
+  const WHY = { todo: '할 일 목록에 안 끝난 줄이 남았어요', said: '「했어?」 물음의 답에 놓쳤다는 말이 있었어요', abort: '맡은 직원이 중단됐어요' };
+  function paperCard(id) {
+    const p = ((snap.office && snap.office.papers) || []).find((x) => x.id === id);
+    const head = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📄 놓친 일 서류</h2><div class="kind">${p ? `${esc(p.who === 'main' ? '팀장' : p.unit)} 자리 · ${hhmm(p.at)}` : ''}</div></div></div>`;
+    if (!p) return head + '<div class="row">이 서류는 이미 넘겼어요 (또는 그 일이 끝나서 치웠어요).</div>';
+    const line = `놓친 일 다시 확인: ${p.text}`, st = picks.get(id);
+    const now = st === 'fail' ? '<div class="paper err">패널에 못 전했어요 — 아래 문장을 복사해 Claude Code 입력창에 붙여 넣으세요.</div>'
+      : p.picked != null ? `<div class="row"><b>팀장</b>${Date.now() - p.picked < PICK_MS ? '서류를 주워 와 확인하는 중 → 곧 Claude Code 입력창에 문장이 들어가요' : '입력창에 넣었어요. 확인하고 Enter 는 직접'}</div>`
+        : st ? '<div class="row"><b>팀장</b>주우러 가는 중…</div>' : '<div class="row"><b>팀장</b>바닥의 서류를 누르면 주우러 가요</div>';
+    return head + `<div class="row"><b>왜</b>${esc(WHY[p.why] || '')}</div>` + `<div class="paper">${esc(line)}</div>` + now +
+      `<button class="more" data-copy="${esc(line)}">📋 문장 복사</button>` +
+      '<div class="note">흔적 있는 것만 서류가 돼요: 할 일 목록(TodoWrite · TaskCreate)에 안 끝난 줄 · 「했어?」 물음의 답에 「깜빡 · 놓쳤 · 못 했」 · 직원 중단. 그 일이 나중에 끝나면 서류도 사라져요. 보내기는 직접 (보내기 전엔 토큰 0).</div>';
+  }
+
   // 👥 명부: 내가 만든 에이전트 (.claude/agents)
   function rosterCard() {
     const list = snap.roster || [];
@@ -871,9 +1404,12 @@
   const HELP = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>👋 사무실 사용법</h2><div class="kind">처음 오셨나요?</div></div></div>
     <div class="row">여기는 지금 이 프로젝트(= 회사)의 사무실이에요. Claude 에게 일을 시키면 직원들이 출근해서 일하는 모습이 보여요.</div>
     <div class="row"><b>팀장</b>지금 대화하는 Claude. 일을 나누면 직원이 문으로 출근해요 — 기본은 기획자 · 디자이너 · 개발자 · QA · 리서처, 내가 만든 에이전트는 그 이름 그대로. 팀이면 「QA 1팀」 처럼 한 자리.</div>
+    <div class="row"><b>청록 깔개 · 같은 일 ×n</b>같은 일을 나눠서 동시에 하는 직원들. 누르면 그 직원들 목록과 각자 상태.</div>
     <div class="row"><b>직원을 누르면</b>오른쪽에 「지금 화면」 — 실행 중인 명령 · 고치는 파일 · 방금 한 일.</div>
     <div class="row"><b>📚 책장</b>내 스킬 목록과 한 줄 설명. 스킬을 쓰면 담당 직원이 책을 꺼내 와 읽어요.</div>
-    <div class="row"><b>📋 게시판</b>사무실 소식 최근 3줄, 누르면 10줄.</div>
+    <div class="row"><b>🔍 심사대</b>검토 · 리뷰를 맡은 직원이 오면 복도 옆에 생겨요. 검사 받는 직원이 서류를 들고 줄 서고, 번호판에 검토 중 · 통과 · 반려. 누르면 반려 이유까지.</div>
+    <div class="row"><b>📋 게시판</b>사무실 소식 최근 3줄. 누르면 오른쪽에 소식 전체 목록.</div>
+    <div class="row"><b>📄 놓친 일 서류</b>할 일 목록에 안 끝난 줄 · 「했어?」 물음에 「깜빡했어요」 · 직원 중단처럼 흔적이 있으면 그 자리 바닥에 떨어져요. 누르면 팀장이 주워 와 Claude Code 입력창에 「놓친 일 다시 확인: …」 을 넣어 줘요 (보내기는 직접).</div>
     <div class="row"><b>🔔 확인 필요</b>Claude 가 허락 · 질문의 답을 기다리면 맨 위에 노란 줄이 떠요. Claude Code 창으로 가서 답해 주세요.</div>
     <div class="row"><b>📋 보고서</b>일이 끝나면 맨 위 「이번 일 보고서」. 다시 보기는 패널에서 누르면 여기에도 같이 보여요.</div>
     <div class="row"><b>👥 명부</b>내가 만든 에이전트 목록. 「맡기기 문장 복사」 → 입력창에 붙여 넣기.</div>
@@ -901,6 +1437,34 @@
       if (lastCardHtml !== HELP) { lastCardHtml = HELP; $('cardBody').innerHTML = HELP;
         const f = $('cardFace'), fc = f && f.getContext('2d'); if (fc) { fc.imageSmoothingEnabled = false; fc.drawImage(S.get('lead', { pose: 'thumb', expr: 'happy' }), 0, 0); } }
       el.hidden = false; return;
+    }
+    if (String(sel).startsWith('__paper:')) {
+      const html = paperCard(sel.slice(8));
+      if (html !== lastCardHtml) { lastCardHtml = html; $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d'); if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('lead', { pose: 'read' }), 0, 0); } }
+      el.hidden = false; return;
+    }
+    if (sel === '__news') {
+      const html = newsCard();
+      if (html !== lastCardHtml) {
+        lastCardHtml = html;
+        $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d');
+        if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('lead', { pose: 'idle', expr: 'happy' }), 0, 0); }
+      }
+      el.hidden = false;
+      return;
+    }
+    if (sel === '__review') {
+      const html = reviewCard();
+      if (html !== lastCardHtml) {
+        lastCardHtml = html;
+        $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d');
+        if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('qa', { pose: 'read' }), 0, 0); }
+      }
+      el.hidden = false;
+      return;
     }
     if (sel === '__shelf') {
       const html = shelfCard();
@@ -943,16 +1507,33 @@
       const ws = [...(o.workers || [])].reverse().slice(0, 8);
       if (ws.length) row('맡긴 일', list(ws.map((w) => `<li class="${w.ended != null ? 'dim' : ''}">${esc(unitName(w))}${w.member ? ' ' + esc(w.member) : ''} — ${esc(w.task || '(설명 없음)')} · ${esc(w.status === 'done' ? '보고 완료' : w.action)}</li>`)));
       if (L0.recent.length) row('한 일', list(L0.recent.slice(0, 10).map(([t2, x]) => `<li><time>${hhmm(t2)}</time>${esc(x)}</li>`)));
+    } else if (sel === '__more' || String(sel).startsWith('fold:')) {
+      // 접은 자리 · 「+n명」: 그 안의 자리마다 사람과 각자 상태
+      const seat = L.seats.find((x) => x.pick === sel);
+      if (!seat) { el.hidden = true; return; }
+      const inside = (snap.units || []).filter((u) => seat.units.includes(u.key));
+      head = seat.name; kind = sel === '__more' ? '자리가 모자라 접은 직원들' : '같은 직군이라 한 자리로 접었어요'; look = lookOf(seat.job || 'guest'); who = seat.worker;
+      rows.push('<div class="note">창을 넓히거나 키우면 펼쳐져요.</div>');
+      for (const u of inside) {
+        const ms = u.members.map((m) => (o.workers || []).find((w) => w.id === m.id)).filter(Boolean).reverse();
+        row(`${u.key}${u.loop ? ` ⟳${u.loop}` : ''}`, list(ms.slice(0, 6).map((x) => `<li class="${x.ended != null ? 'dim' : ''}">${x.member ? `<b>${esc(x.member)}</b> ` : ''}${esc(x.status === 'done' ? '보고 완료 ✓' : x.ended != null ? '퇴근' : x.action)} — ${esc(x.task || '')}</li>`)));
+      }
     } else {
       const u = (snap.units || []).find((x) => x.key === sel);
       if (!u) { el.hidden = true; return; }
       const members = u.members.map((m) => (o.workers || []).find((w) => w.id === m.id)).filter(Boolean);
       const w = members.slice().reverse().find((x) => x.ended == null) || members[members.length - 1];
       head = u.key; kind = `에이전트 종류: ${[...new Set(members.map((x) => x.role))].join(', ')}`; look = lookOf(u.job); who = w;
+      // 청록 깔개(나란히 자리)로 앉은 자리면 맨 위에 그 뜻을 쉬운 말로 (아래 「같은 일 직원」 에 목록 · 상태)
+      const twinsHere = L.seats.filter((x) => x.kind === 'twin' && x.pick === u.key).length;
+      if (twinsHere) rows.push(`<div class="note" style="margin-top:0">같은 일을 나눠서 동시에 하는 직원들이에요 (${twinsHere}명)</div>`);
       if (w) {
         rows.push(screen(w, ''));
         row('지금', w.status === 'done' ? `보고 완료 · ${ago(now - (w.ended || now))} 전` : `${esc(w.action)} · ${ago(now - w.since)}째`);
         if (w.task) row('맡은 일', `${esc(w.task)} <span style="color:#8a7f74">(팀장이 맡김)</span>`);
+        { const t = TIER[w.tier];
+          if (t) row('모델 직급', `<span style="background:${t.bg};color:${t.fg};padding:1px 8px;border-radius:9px;font-weight:700">${t.stars} ${t.name}</span>${w.model ? ` <span style="color:#8a7f74">${esc(w.model)}</span>` : ''}`); }
+        if (w.persona) row('페르소나', `<span style="color:#ff6b6b;font-weight:700">「${esc(w.persona)}」</span> <span style="color:#8a7f74">(맡긴 일에서 입힌 성격)</span>`);
         row('피로도', gauge(pw.workers && pw.workers[w.id]));
         { const wp = pctOf(pw.workers && pw.workers[w.id]);
           if (wp != null && wp >= 70) rows.push('<div class="note">대화가 많이 찼어요. 남은 일은 새 직원에게 나눠 맡기면 덜 피곤해요. 이 직원은 팀장과 따로 자기 대화를 들고 일해서, 일이 끝나면 이 대화는 버려지고 다음 직원은 0% 부터 시작해요.</div>'); }
@@ -961,9 +1542,15 @@
         if (sumT(tot)) row('전기세 몫', `${man(sumT(tot))} · ${parts(tot)}<br><span style="color:#8a7f74">실제 AI 직원이라 따로 대화를 들고 일해요. 직원이 많을수록 전기세가 더 나와요.</span>`);
         if (w.handback) rows.push(`<div class="paper">넘긴 서류: 「${esc(w.handback)}」</div>`);
         if (w.error) rows.push(`<div class="paper err">⚠ 실패: ${esc(w.error)}</div>`);
-        if (u.team) {
+        if (u.boss) row('파트', `${esc(u.boss)} 파트장이 맡긴 일`);
+        if (u.loop) row('반복', `<b style="color:#ff6b6b">⟳ ${u.loop}번째</b> 다시 하는 중 <span style="color:#8a7f74">(반려 · 같은 일 다시 맡김)</span>`);
+        if (u.kids) {
+          const kids = (snap.units || []).filter((x) => x.boss === u.key).flatMap((x) => x.members.map((m) => [x.key, (o.workers || []).find((w) => w.id === m.id)])).filter((p2) => p2[1]);
+          row(`파트원 ${u.kids}명`, list(kids.reverse().slice(0, 8).map(([k2, x]) => `<li class="${x.ended != null ? 'dim' : ''}"><b>${esc(k2)}</b> ${esc(x.status === 'done' ? '보고 완료 ✓' : x.ended != null ? '퇴근' : x.action)} — ${esc(x.task || '')}</li>`)));
+        }
+        if (u.team || u.count >= 2) {
           const state = (x) => (x.status === 'done' ? '보고 완료 ✓' : x.status === 'unfinished' ? '못 끝냄' : x.ended != null ? '퇴근' : x.action);
-          row(`팀원 ${members.length}명`, list(members.slice().reverse().map((x, i) => `<li class="${x.ended != null ? 'dim' : ''}"><b>${esc(x.member || members.length - i)}</b> ${esc(state(x))} — ${esc(x.task || '')}${x.handback ? `<br>　서류 「${esc(x.handback.slice(0, 60))}」` : ''}</li>`)));
+          row(`${u.team ? '팀원' : '같은 일 직원'} ${members.length}명`, list(members.slice().reverse().map((x, i) => `<li class="${x.ended != null ? 'dim' : ''}"><b>${esc(x.member || members.length - i)}</b> ${esc(state(x))} — ${esc(x.task || '')}${x.handback ? `<br>　서류 「${esc(x.handback.slice(0, 60))}」` : ''}</li>`)));
         }
         if (w.recent.length) row('한 일', list(w.recent.slice(0, 10).map(([t2, x]) => `<li><time>${hhmm(t2)}</time>${esc(x)}</li>`)));
       }
@@ -971,7 +1558,7 @@
     rows.push('<div class="note">말 걸기는 Claude Code 옆 패널에서 이 직원을 눌러서 해요 (보낼 때만 토큰이 들어요).</div>');
     $('cardBody').innerHTML = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>${esc(head)}</h2><div class="kind">${esc(kind)}</div></div></div>${rows.join('')}`;
     const f = $('cardFace'), fc = f && f.getContext('2d');
-    if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get(look, { pose: who ? poseOf(who, false) : 'idle', frame: Math.floor(now / 350), expr: 'normal' }), 0, 0); }
+    if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); const cardPct = sel === 'main' ? pctOf(pw.lead) : (who ? pctOf(pw.workers && pw.workers[who.id]) : null); const cardPose = who ? poseOf(who, false) : 'idle'; fc.drawImage(S.get(look, { pose: cardPose, frame: Math.floor(now / 350), expr: exprOf(cardPct, who, now), sweat: cardPose === 'sweat' || (cardPct != null && cardPct >= 70) }), 0, 0); }
     el.hidden = false;
   }
 
@@ -1010,14 +1597,16 @@
     const wx = ((ev.clientX - r.left) * dpr) / sd, wy = ((ev.clientY - r.top) * dpr) / sd;
     return hits.find((h) => wx >= h.x && wx < h.x + h.w && wy >= h.y && wy < h.y + h.h);
   }
-  const refit = () => { if (snap && snap.office) fit(); };
+  // 카드를 열고 닫으면 사무실 폭이 바뀐다: 창 크기 바꿀 때처럼 맞추자마자 바로 다시 그린다 (안 그리면 한 프레임 비어 깜빡임)
+  const refit = () => refitNow();
   canvas.addEventListener('click', (ev) => {
     const h = hitAt(ev);
-    if (h && h.key === '__news') { newsOpen = !newsOpen; news(); return; }
-    const was = !!sel; sel = h ? h.key : null; card(); if (was !== !!sel) refit();
+    if (h && h.key === '__news') { openNews(); return; }
+    if (h && h.key.startsWith('__paper:')) pick(h.key.slice(8));
+    const was = !!sel; sel = h ? h.key : null; card(); news(); if (was !== !!sel) refit();
   });
   canvas.addEventListener('mousemove', (ev) => { const h = hitAt(ev); if ((h && h.key) !== hover) { hover = h && h.key; canvas.classList.toggle('hand', !!h); } });
-  $('close').addEventListener('click', () => { sel = null; card(); refit(); });
+  $('close').addEventListener('click', () => { sel = null; card(); news(); refit(); });
   const open = (k) => () => { const was = !!sel; sel = sel === k ? null : k; card(); if (was !== !!sel) refit(); };
   $('report').addEventListener('click', open('__report'));
   $('roster').addEventListener('click', open('__roster'));
@@ -1041,17 +1630,21 @@
     if (firstTake && snap && snap.office) {
       firstTake = false;
       if (qs.get('sel')) sel = qs.get('sel');
-      if (qs.get('news') === 'open') newsOpen = true;
+      if (qs.get('news') === 'open') { sel = '__news'; newsDrop = true; }
     }
     $('empty').hidden = !!(snap && snap.office);
     if (snap && snap.office) {
       // 자리 수가 바뀌면 배율부터 다시, 아니면 같은 폭으로 자리만 새로 (깜빡이지 않게)
-      const now = (snap.units || []).map((u) => u.key).join('|');
-      if (!L || now !== sig) { sig = now; fit(); try { render(Date.now()); } catch (e) { /* 다음 장면에 */ } } else L = layout(L.W);
+      // 자리 수 = 접기 단계들의 자리 수 + 심사대 유무 (심사대가 grid 칸을 하나 더 쓸 수 있다). 일하는 수(count)는 안 본다:
+      // 나란히 앉은 직원 하나가 끝나도 퇴근 걸음이 끝날 때까지 자리는 그대로라 배율이 들썩이지 않게
+      const st0 = stepsOf();
+      const now = JSON.stringify([(snap.units || []).map((u) => u.key), st0.main.map((x) => x.length), (st0.part || []).map((x) => x.length), reviewersOf(snap.office).length > 0]);
+      if (!L || now !== sig) { sig = now; fit(); try { render(Date.now()); } catch (e) { /* 다음 장면에 */ } } else L = Object.assign(layout(L.W, L.Hmax), { Hmax: L.Hmax });
     }
     hud();
-    if (sel && sel !== 'main' && !sel.startsWith('__') && !(snap.units || []).some((u) => u.key === sel)) sel = null; // __ 로 시작 = 책장 · 보고서 · 명부 · 도움말 카드
+    if (sel && sel !== 'main' && !sel.startsWith('__') && !sel.startsWith('fold:') && !(snap.units || []).some((u) => u.key === sel)) sel = null; // __ 로 시작 = 책장 · 보고서 · 명부 · 도움말 카드
     if (sel === '__report' && !snap.report) sel = null;
+    if (sel === '__review' && !(L && L.desk)) sel = null; // 검사 직원이 없어져 심사대가 사라짐
     if (sel) card();
   }
   function connect() {
@@ -1092,5 +1685,5 @@
   requestAnimationFrame(loop);
 
   // 시험용: 화면 없이 배치만 확인
-  window.__termimates = { layout: (W) => layout(W), take, motionOf: (s, now) => motionOf(snap.office, s, now), world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { newsOpen = open; lastNews = ''; news(); return $('newsList').innerHTML; } };
+  window.__termimates = { layout: (W, Hmax) => layout(W, Hmax), take, motionOf: (s, now, who) => motionOf(snap.office, s, now, who), boxes: () => boxes, papers: () => paperSpots(snap.office), hits: () => hits, click: (k) => { if (k.startsWith('__paper:')) pick(k.slice(8)); sel = k; card(); return $('cardBody').innerHTML; }, world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
 })();

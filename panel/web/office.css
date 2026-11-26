@@ -60,11 +60,13 @@ body { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-col
 #office { display: block; margin: 0 auto; cursor: default; }
 #office.hand { cursor: pointer; }
 #spark { width: 72px; height: 18px; }
-/* 책장 밑 「사무실 소식」 게시판: 접으면 최근 3줄, 누르면 10줄 */
+/* 책장 밑 「사무실 소식」 게시판: 최근 3줄, 누르면 옆 카드에 전체 목록 (책장처럼) */
 #news { position: absolute; z-index: 2; cursor: pointer; font-size: 11px; color: #2b2420; overflow: hidden;
-  border-radius: 4px; transition: width .25s ease, height .25s ease, box-shadow .25s ease; }
-#news .nh { font-weight: 700; color: #fff6e0; text-shadow: 0 1px 0 #0006; padding: 3px 6px 2px; display: flex; gap: 6px; white-space: nowrap; }
-#news .nh span { margin-left: auto; font-weight: 500; opacity: .85; }
+  border-radius: 4px; transition: box-shadow .25s ease; } /* 크기는 배치가 바뀔 때만 바뀌니 바로 (늘어나는 중에 게시판 밖으로 삐져나와 보이지 않게) */
+#news .nh { font-weight: 700; color: #fff6e0; text-shadow: 0 1px 0 #0006; padding: 3px 6px 2px; display: flex; gap: 6px; white-space: nowrap;
+  overflow: hidden; min-width: 0; }
+#news .nh b { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#news .nh span { margin-left: auto; font-weight: 500; opacity: .85; flex: none; } /* 「▸ 전체 n」 은 늘 보이고, 모자라면 제목이 줄어든다 */
 #newsList { display: flex; flex-direction: column; gap: 3px; padding: 0 5px 5px; }
 #newsList div { background: #fffdf3; border-radius: 2px; padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   box-shadow: 0 1px 2px #0004; }
@@ -73,14 +75,11 @@ body { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-col
 #newsList i { font-style: normal; color: #8b2a2a; font-weight: 700; margin-right: 4px; }
 #newsList .new { animation: note .5s ease-out; }
 @keyframes note { from { transform: translateX(8px); opacity: 0; } }
-#news.open { background: #f8f1e3; color: #2b2420; box-shadow: 0 14px 40px #000a; border: 2px solid #b9926a; }
-#news.open .nh { color: #5b3a22; text-shadow: none; border-bottom: 1px dashed #d8c6ae; padding: 6px 10px; }
-#news.open #newsList { padding: 6px 8px 8px; gap: 4px; }
-#news.open #newsList div { font-size: 12px; padding: 4px 8px; white-space: normal; }
+#news.on { outline: 2px solid #ffd89b; outline-offset: 2px; } /* 옆 카드로 보는 중 */
 
 /* 카드 맨 위 「지금 화면」: 그 사람이 지금 하는 일을 모니터처럼 */
 #card .who { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
-#card .who canvas { width: 48px; height: 64px; image-rendering: pixelated; background: #efe4d3; border-radius: 10px; }
+#card .who canvas { width: 96px; height: 128px; image-rendering: pixelated; background: #efe4d3; border-radius: 10px; }
 #card .screen { background: #0f151c; color: #d6f5d6; border-radius: 10px; padding: 0 0 8px; margin: 4px 0 12px;
   font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; box-shadow: inset 0 0 0 1px #24313d; overflow: hidden; }
 #card .screen .bar { display: flex; gap: 5px; align-items: center; padding: 6px 10px; background: #1b2530; color: #8fa3b5; font-size: 11px; }
@@ -132,6 +131,8 @@ body { display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-col
 #card .snote { font-size: 12px; color: #6b5d50; margin-top: 2px; line-height: 1.45; }
 #card .more { margin-top: 10px; width: 100%; border: 1px dashed #c9b79f; background: #fbf6ee; color: #6b5d50; border-radius: 8px;
   padding: 8px; font: inherit; font-size: 12px; cursor: pointer; }
+#card .srow.still { animation: none; }
+#card .srow.fresh { animation: drop .32s ease-out both; background: #fff3cf; }
 @keyframes drop { from { transform: translateY(-8px); opacity: 0; } }
 
 #close { position: absolute; right: 10px; top: 8px; border: 0; background: none; font-size: 16px; cursor: pointer; color: #8a7f74; }
