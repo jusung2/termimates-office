@@ -69,6 +69,7 @@ export function tagText(s: { name: string; kind?: string; count: number; kids?: 
 let lastWidth = 0 // 애니메이션 타이머가 쓰는 패널 폭 (다시 그릴 때마다 갱신)
 let lastRows = 0 // 그림이 쓸 수 있는 줄 수 (패널 높이 - 위 글줄 - 카드 몫)
 let cardRows = 12 // 그림 아래 카드 몫 (그리기마다 이번 카드 높이로 다시 잼 — 처음 한 번만 이 값으로 어림)
+let calms = 0 // 안 붐빈 채 그린 횟수 (펼쳐 둔 카드는 이 수가 늘면 무효 — 그리기 중엔 상태를 못 써서 여기 센다)
 
 /** 글 한 줄이 폭 안에서 몇 줄로 접히는지 */
 const wrapped = (text: string, width: number): number => Math.max(1, Math.ceil(dw(text) / Math.max(1, width)))
@@ -1233,13 +1234,14 @@ export const register: Register = on => {
       detail.push(<Text key="d-f"><Text color={color}>{f + c}</Text>{p ? <Text color={LED.num}>{p}</Text> : null}</Text>)
     }
     // crowded = 붐빌 때 짧은 카드 (맡긴 일 3줄 + 「외 n건」 · 한 일 2줄 · 설명 줄 빼기)
-    const buildCard = async (crowded: boolean) => {
+    // mark = 접을 수 있을 때 머리줄 앞 「▾ 」 (머리줄을 누르면 접힘)
+    const buildCard = async (crowded: boolean, mark = '') => {
       detail = []
       detailRows = 0
       const doneN = crowded ? 2 : undefined
       if (sel === 'main') {
         // 지금 하는 일 · 사장님 지시는 위 글줄에 이미 있어서 카드엔 안 쓴다 (몇 초째만 머리줄에)
-        line('d-h', `팀장 · 메인 Claude · 지금 일 ${ago(now - o.lead.since)}째`, { bold: true })
+        line('d-h', `${mark}팀장 · 메인 Claude · 지금 일 ${ago(now - o.lead.since)}째`, { bold: true })
         if (leadPct !== undefined) fuelLine([`피로도: ${leadPct}% ${st!.name}`, `피로도 ${leadPct}%`],
           [` · 대화 ${man(pw.lead!.tokens)} / ${man(pw.lead!.window)} 토큰`, ` · 대화 ${man(pw.lead!.tokens)}`], st?.color, pw.byWorker.main, ' (이번 세션)')
         else fuelLine(['피로도: 아직 안 잼 (다음 대답 때 재요)', '피로도: 아직 안 잼'], [], undefined, pw.byWorker.main, ' (이번 세션)')
@@ -1267,7 +1269,7 @@ export const register: Register = on => {
       } else if (selSeat) {
         // 접은 자리 · +n: 그 안의 자리마다 사람과 각자 상태
         const inside = units.filter(u => selSeat.ids?.some(id => u.list.some(w => w.id === id)))
-        line('d-h', selSeat.kind === 'more' ? `자리가 모자라 접은 ${selSeat.name.slice(1)}` : `${selSeat.name} (같은 직군 접음)`, { bold: true })
+        line('d-h', mark + (selSeat.kind === 'more' ? `자리가 모자라 접은 ${selSeat.name.slice(1)}` : `${selSeat.name} (같은 직군 접음)`), { bold: true })
         line('d-fn', '자리가 모자라 한 자리로 접었어요. 패널을 넓히거나 키우면 펼쳐져요.', { dimColor: true })
         inside.forEach((u, i) => {
           line('d-u' + i, `${u.key} · ${u.active.length ? `일하는 중 ${u.active.length}명` : '다 끝남'}${u.loop ? ` · ⟳${u.loop}` : ''}`, { bold: true })
@@ -1278,7 +1280,7 @@ export const register: Register = on => {
       } else {
         const list = o.workers.filter(w => unitOf(w) === sel).reverse()
         const w = list.find(x => x.ended === undefined) ?? list[0]
-        line('d-h', `${sel}${list.length > 1 ? ` · 이번 세션 ${list.length}번 출근` : ''}`, { bold: true })
+        line('d-h', `${mark}${sel}${list.length > 1 ? ` · 이번 세션 ${list.length}번 출근` : ''}`, { bold: true })
         // 청록 깔개(나란히 자리)로 앉은 자리면 맨 위에 그 뜻을 쉬운 말로 (그림엔 글자 없이 깔개만)
         const twinsHere = L.seats.filter(x => x.kind === 'twin' && x.pick === sel).length
         if (twinsHere) line('d-twin', `같은 일을 나눠서 동시에 하는 직원들이에요 (${twinsHere}명)`, { color: 'suggestion' }) // 그림의 청록 깔개 · 「같은 일 ×n」
@@ -1351,10 +1353,40 @@ export const register: Register = on => {
     await buildCard(false)
     const folds = plan(units, width, Math.max(1, bodyRows - headRows - detailRows - extra)).spots.some(x => x.kind === 'fold' || x.kind === 'more')
     if (e.surface === 'terminal' && (isCrowded(units) || folds)) await buildCard(true)
+    // 붐빌 때 카드 접기: 섬 후보이고, 카드를 「요약 한 줄 + 말 걸기 칸」 으로 접으면 그림 배율이 커질 때만.
+    // 접히는 건 팀장 카드뿐 (직원을 눌러 연 카드는 일부러 본 것이니 펼친 채, 머리줄 「▾」 를 누르면 팀장 카드로 돌아가 접힘).
+    // 사장님이 펼쳐 둔 것(cardOpen)은 붐비는 동안 그대로, 한 번이라도 안 붐비면 무효 (다음에 붐비면 다시 접혀서 시작)
+    const crowdedNow = e.surface === 'terminal' && isCrowded(units)
+    if (e.surface === 'terminal' && !crowdedNow) calms++ // 다른 화면(웹 등)에서 그린 건 안 센다
+    const epoch = calms + 1
+    const FOLD_ROWS = 2 // 요약 한 줄 + 말 걸기 칸 (테두리 없이)
+    const foldGain = crowdedNow &&
+      plan(units, width, Math.max(1, bodyRows - headRows - FOLD_ROWS)).k > plan(units, width, Math.max(1, bodyRows - headRows - detailRows - extra)).k
+    const folded = foldGain && sel === 'main' && v.cardOpen !== epoch
+    const foldCard = () => update($, view, x => ({ ...(x ?? v), selected: 'main', cardOpen: undefined }))
+    const openCard = () => update($, view, x => ({ ...(x ?? v), selected: 'main', cardOpen: epoch }))
+    let summary = ''
+    if (folded) {
+      // 「▸ 팀장 · 13% 쌩쌩 · 전기세 2.1억 · 맡긴 일 10건 (일하는 중 3)」 — 좁으면 뒤에서부터 줄인다
+      const tok = sum(pw.byWorker.main)
+      const busy = o.workers.filter(w => w.ended === undefined).length
+      const parts0 = [
+        '▸ 팀장',
+        leadPct !== undefined ? ` · ${leadPct}% ${st!.name}` : ' · 피로도 아직 안 잼',
+        tok ? ` · 전기세 ${man(tok)}` : '',
+        o.workers.length ? ` · 맡긴 일 ${o.workers.length}건` : '',
+        o.workers.length ? ` (일하는 중 ${busy})` : '',
+      ]
+      const tries = [parts0, [...parts0.slice(0, 4), ''], [parts0[0]!, parts0[1]!, '', parts0[3]!, ''], [parts0[0]!, parts0[1]!, '', '', '']].map(x => x.join(''))
+      const hint = ' · 누르면 펼침'
+      summary = [tries[0]! + hint, ...tries].find(x => dw(x) <= width) ?? fit(tries[tries.length - 1]!, width)
+      detail = []
+      detailRows = 1
+    } else if (foldGain) await buildCard(true, '▾ ')
     // 그림 몫을 이번 카드 높이로 정확히: 지난번과 다르면 다시 놓는다.
     // 카드가 안 보일 때(책장 · 안내 · 피로도 · 보고서)는 지난번 몫 그대로 (그림이 들썩이지 않게)
     if (e.surface === 'terminal' && !(v.shelf || v.guide || v.tired || (v.report && rep))) {
-      const rows = detailRows + extra
+      const rows = folded ? FOLD_ROWS : detailRows + extra
       if (rows !== cardRows) {
         cardRows = rows
         lastRows = Math.max(1, bodyRows - headRows - cardRows)
@@ -1617,8 +1649,9 @@ export const register: Register = on => {
         {tiredCard}
         {reportCard}
         {v.shelf ? shelfList(false) : null}
-        <Box key="card" flexDirection="column" borderStyle="round" paddingX={1} display={v.shelf || v.guide || v.tired || (v.report && rep) ? 'none' : 'flex'}>
-          {detail}
+        <Box key="card" flexDirection="column" borderStyle={folded ? undefined : 'round'} paddingX={folded ? 0 : 1} display={v.shelf || v.guide || v.tired || (v.report && rep) ? 'none' : 'flex'}>
+          {folded ? <Button key="card-fold" plain onPress={openCard}><Text bold>{summary}</Text></Button> : null}
+          {foldGain && !folded && detail.length ? [<Button key="card-unfold" plain onPress={foldCard}>{detail[0]!}</Button>, ...detail.slice(1)] : detail}
           {talk}
           {renameBox}
           {agentId ? (
