@@ -55,6 +55,17 @@ function fit(s: string, cols: number): string {
   return out + '…'
 }
 
+/** 이름표 글: 자리 이름 · 같이 일하는 수(×n) · 파트장 아래 수(+n) · 퇴근. room(칸) 안에 들게 줄인다:
+ *  그대로 → 나란히 자리(같은 일 ×n)는 번호(「1/3」)를 뺀다(깔개 위 「같은 일 ×n」 · 카드에 있음) → 띄어쓰기를 뺀다 → 끝을 「…」.
+ *  번호를 띄어쓰기보다 먼저 빼는 건 「designer1/3」 처럼 붙인 글이 옆자리 것과 한 낱말로 이어져 읽히기 때문 */
+export function tagText(s: { name: string; kind?: string; count: number; kids?: number }, room: number, away = false): string {
+  const tail = (s.kind !== 'fold' && s.kind !== 'more' && s.count > 1 ? ` ×${s.count}` : '') + (s.kids ? ` +${s.kids}` : '') + (away ? ' 퇴근' : '')
+  const full = s.name + tail
+  const short = s.kind === 'twin' ? s.name.replace(/ \d+\/\d+$/, '') + tail : full
+  const pick = [full, short, short.replace(/ /g, '')].find(x => dw(x) <= room)
+  return pick ?? fit(short, room)
+}
+
 let lastWidth = 0 // 애니메이션 타이머가 쓰는 패널 폭 (다시 그릴 때마다 갱신)
 let lastRows = 0 // 그림이 쓸 수 있는 줄 수 (패널 높이 - 위 글줄 - 카드 몫)
 let cardRows = 12 // 그림 아래 카드 몫 (지난번에 그린 카드 높이. 한 줄 줄어든 건 무시 — 카드가 한 줄 바뀔 때마다 그림이 들썩이지 않게)
@@ -1437,11 +1448,11 @@ export const register: Register = on => {
             const isSel = pickKey === sel
             const tone = w?.status === 'unfinished' ? 'error' : w?.status === 'done' ? 'success' : w?.status === 'ask' ? 'warning' : undefined
             // 이름표: 자리 이름 · 같이 일하는 수 · 파트장이면 그 아래 사람 수(「+3」, 층은 카드에서) · 다시 하는 횟수 ⟳n
-            // 이름표는 자리 폭보다 한 칸 좁게: 옆자리 이름표와 붙어 「리서처 3/3디자이너 1/2」 처럼 읽히지 않게. 넘치면 띄어쓰기부터 뺀다
-            const TAG = CWK - 1
-            const base1 = s.name + (s.kind !== 'fold' && s.kind !== 'more' && s.count > 1 ? ` ×${s.count}` : '') + (s.kids ? ` +${s.kids}` : '') +
-              (away.has(s.key) ? ' 퇴근' : '')
-            const base0 = dw(base1) > TAG ? base1.replace(/ /g, '') : base1
+            // 이름표는 자리 폭보다 좁게: 옆자리 이름표와 붙어 「designer1/3designer2/3」 처럼 읽히지 않게 (tagText)
+            // 옆자리가 한 자리 폭으로 붙어 있으면 두 칸 좁게: 가운데 놓으면 이름표 사이가 늘 두 칸 이상 빈다
+            const tight = L.seats.some(x => x !== s && x.row === s.row && Math.abs(xOf(L, x.col) - xOf(L, s.col)) <= CWK + 1)
+            const TAG = CWK - (tight ? 2 : 1)
+            const base0 = tagText(s, TAG, away.has(s.key))
             const base = s.loop && dw(base0) + 3 <= TAG ? `${base0} ⟳${s.loop}` : base0
             // 직급 별(★★)은 자리 폭에 들어갈 때만 이름 뒤에 (안 들어가면 카드에서 봄)
             const stars = w && s.key !== 'main' && w.tier ? TIERS[w.tier].stars : ''

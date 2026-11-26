@@ -9,8 +9,13 @@ import {
   verdictOf,
 } from './words'
 
-/** 그 직원의 짧은 한글 역할 */
-export const jobOfW = (w: Worker): string => w.job ?? title(w.role)
+/** 그 직원의 짧은 한글 역할.
+ *  적어 둔 이름(job)이 종류 이름 그대로(「designer」)면 지금 규칙으로 다시 고른다: 표준 이름을 쉬운 역할로 바꾸는 규칙이 생기기 전에
+ *  출근해 저장된 직원 · /reload-plugins 뒤 이어 쓰는 사무실도 「디자이너」 로 (사용자가 지은 이름은 jobOf 가 그대로 돌려준다) */
+export const jobOfW = (w: Worker): string => {
+  if (!w.job) return title(w.role)
+  return w.job === (w.role.split(':').pop() ?? w.role) ? jobOf(w.role, w.task) : w.job
+}
 
 /** 그 직원의 생김새용 기본 역할 (이름이 뭐든) */
 export const familyOfW = (w: Worker): string => w.family ?? familyOf(w.role, w.task)

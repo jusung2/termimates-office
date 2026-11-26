@@ -206,7 +206,7 @@ test('이름표: 흔한 표준 에이전트 이름과 정확히 같을 때만 �
   }
 })
 
-test('터미널 이름표는 자리 폭보다 한 칸 좁게 (옆자리 이름표와 붙어 읽히지 않게, 넘치면 띄어쓰기부터 뺌)', async ($, on) => {
+test('터미널 이름표: 옆자리와 붙어 있으면 자리 폭보다 두 칸 좁게, 넘치면 나란히 자리 번호 → 띄어쓰기 → 「…」 순으로 줄임', async ($, on) => {
   mock.clock(on, { now: Date.UTC(2026, 10, 24, 5, 0, 0) })
   on('command.register', () => ({ value: { command: 'termimates' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -225,8 +225,10 @@ test('터미널 이름표는 자리 폭보다 한 칸 좁게 (옆자리 이름�
     props: { title: '사무실', isFocused: false, bodyColumns: 113, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } })
   const dw = (s: string) => [...s].reduce((n, ch) => n + ((ch.codePointAt(0) ?? 0) > 0x1100 ? 2 : 1), 0)
   const tags = (await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('pick-') && b.key !== 'pick-main')
-  expect(tags.some(b => b.text.includes('디자이너1/2'))).toBe(true) // 「디자이너 1/2」(12칸) → 띄어쓰기 빼서 11칸
-  for (const b of tags) expect(dw(b.text)).toBeLessThanOrEqual(11)
+  // 「디자이너 1/2」(12칸)은 10칸에 안 들어감 → 번호를 뺀 「디자이너」 (「디자이너1/2」 처럼 붙여 옆자리와 이어 읽히지 않게)
+  expect(tags.some(b => b.text === '디자이너')).toBe(true)
+  expect(tags.some(b => /\d\/\d/.test(b.text) && !/ /.test(b.text))).toBe(false)
+  for (const b of tags) expect(dw(b.text)).toBeLessThanOrEqual(10)
   await ui.unmount()
 })
 
