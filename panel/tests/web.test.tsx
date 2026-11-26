@@ -11,7 +11,8 @@ test('/termimates 웹: 주소를 알려 주고, 사무실 상태를 이 컴퓨�
   on('store.get', (_, e) => ({ value: store[e.key] }))
   on('store.set', (_, e) => { store[e.key] = e.value; return { value: undefined } })
   on('store.keys', () => ({ value: Object.keys(store) }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '/Users/me\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const runs: string[][] = []
+  on('process.run', (_, e) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '/Users/me\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
   on('fs.write', (_, e) => { files[e.path] = e.text; return { value: undefined } })
   on('ui.toast', (_, e) => { toasts.push(String(e.text ?? e)); return { value: undefined } })
   on('ui.panes', () => ({ value: [] }))
@@ -20,6 +21,8 @@ test('/termimates 웹: 주소를 알려 주고, 사무실 상태를 이 컴퓨�
   await $.command.run({ command: 'termimates', args: '웹', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
   expect(toasts.some(t => t.includes('http://127.0.0.1:8766'))).toBe(true)
   expect(store['web:/work/a']).toBe(true)
+  await clock.advance(10)
+  expect(runs.some(a => a[0] === '/usr/bin/open' && a[1] === 'http://127.0.0.1:8766')).toBe(true)
   await $.agent.spawn({
     tool_use_id: 't1', prompt: '너는 QA 2팀의 2-1', description: 'QA 2팀 2-1 경계값', subagentType: 'general-purpose',
     provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false,
