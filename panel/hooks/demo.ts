@@ -36,6 +36,14 @@ const EX = 'demo-explore'
 const PL = 'demo-plan'
 const DS = 'demo-design'
 const DV = 'demo-dev'
+const RV = 'demo-review'
+const DV2 = 'demo-dev2'
+const RV2 = 'demo-review2'
+const QA1 = 'demo-qa1-1'
+const QA2 = 'demo-qa1-2'
+/** QA 팀원 (뒤에서 같이 돌림). 설명에 「QA 1팀 1-n」 이 있으면 사무실엔 팀 하나 = 「QA 1팀」 한 자리 (office.ts teamOf) */
+const qa = (id: string, description: string): Run =>
+  O((o, n) => onSpawn(o, { id, type: 'general-purpose', description, background: true }, n))
 
 export const STEPS: Step[] = [
   // 사장님 지시 → 팀장이 읽고, 화면 파일이 어디 있는지 먼저 훑어본다
@@ -92,6 +100,33 @@ export const STEPS: Step[] = [
     run: all(report(DV, '회원가입 화면 완성: SignUp.tsx 새로 만들고 App.tsx 에 연결했어요. 시험 12개 모두 통과.'),
       use(DV, tk(15000, 160000, 12000, 21000), 141000)),
   },
+  // 서로 검사하기: 리뷰어가 심사대에 앉아 검토 → 반려 → 개발자가 고쳐 오면 다시 검토 → 통과
+  // 그동안 QA 1팀 두 명이 뒤에서 화면을 눌러 본다 (팀 하나 = 「QA 1팀」 한 자리, 팀원 점 둘)
+  { wait: 1500, run: hire(RV, 'code-reviewer', '회원가입 코드 검토') },
+  { wait: 600, run: all(qa(QA1, 'QA 1팀 1-1 회원가입 입력칸 눌러 보기'), qa(QA2, 'QA 1팀 1-2 가입 버튼 눌러 보기')) },
+  { wait: 3600, run: all(tool(QA1, 'Bash', 'npm run e2e -- signup-fields'), tool(QA2, 'Bash', 'npm run e2e -- signup-button')) },
+  { wait: 2800, run: tool(RV, 'Read', `${SRC}/SignUp.tsx`) }, // 문에서 심사대까지 걸어온 뒤
+  { wait: 900, run: all(done(QA1, 'Bash', 'npm run e2e -- signup-fields'), report(QA1, '1-1: 입력칸 4개 모두 잘 들어가요.')) },
+  { wait: 700, run: all(done(QA2, 'Bash', 'npm run e2e -- signup-button'), report(QA2, '1-2: 비밀번호 확인 칸이 비어도 가입 버튼이 눌려요.')) },
+  { wait: 600, run: all(done(RV, 'Read', `${SRC}/SignUp.tsx`), tool(RV, 'Bash', 'npm test -- SignUp')) },
+  { wait: 2000, run: all(done(RV, 'Bash', 'npm test -- SignUp'), tool(RV, 'SubagentHandback')) },
+  {
+    wait: 1300,
+    run: all(report(RV, '판정: 반려\n이유: 비밀번호 확인 칸이 비어 있어도 가입 버튼이 눌려요.'), use(RV, tk(6000, 48000, 4000, 3800), 36000)),
+  },
+  { wait: 4500, run: hire(DV2, 'general-purpose', '회원가입 화면 고치기 (반려된 곳)') },
+  { wait: 2800, run: tool(DV2, 'Edit', `${SRC}/SignUp.tsx`) },
+  { wait: 1800, run: all(done(DV2, 'Edit', `${SRC}/SignUp.tsx`), tool(DV2, 'Bash', 'npm test')) },
+  { wait: 2000, run: all(done(DV2, 'Bash', 'npm test'), tool(DV2, 'SubagentHandback')) },
+  {
+    wait: 1300,
+    run: all(report(DV2, '회원가입 화면 완성: 비밀번호 확인 칸이 비면 가입 버튼을 막았어요. 시험 13개 모두 통과.'),
+      use(DV2, tk(9000, 90000, 6000, 8000), 141000)),
+  },
+  { wait: 1500, run: hire(RV2, 'code-reviewer', '고친 회원가입 코드 다시 검토') },
+  { wait: 7000, run: tool(RV2, 'Read', `${SRC}/SignUp.tsx`) },
+  { wait: 2000, run: all(done(RV2, 'Read', `${SRC}/SignUp.tsx`), tool(RV2, 'SubagentHandback')) },
+  { wait: 1300, run: all(report(RV2, '판정: 통과 ✓\nLGTM — 빈 칸 검사가 들어갔어요.'), use(RV2, tk(4000, 30000, 3000, 2000), 24000)) },
   // 팀장이 결과를 한 번 훑어보고 사장님께 보고
   { wait: 1200, run: tool('main', 'Read', `${SRC}/SignUp.tsx`) },
   { wait: 1500, run: done('main', 'Read', `${SRC}/SignUp.tsx`) },
@@ -102,55 +137,6 @@ export const STEPS: Step[] = [
   },
 ]
 
-// -- 시연 2: 「QA 돌려줘」 3팀 × 3명 (사무실엔 팀 단위로 세 자리만) -----------------------------
-// 사무실엔 팀마다 한 자리(QA 1팀 · 2팀 · 3팀). 팀 안은 차례로: 앞 팀원이 보고하고 퇴근하면 다음 팀원이 문으로 들어온다.
-
-/** [시각(ms), 할 일] 목록 → 기다림 있는 단계 목록 */
-function timeline(events: [number, Run][]): Step[] {
-  const sorted = [...events].sort((a, b) => a[0] - b[0])
-  return sorted.map(([t, run], i) => ({ wait: t - (i ? sorted[i - 1]![0] : 0), run }))
-}
-
-const FOCUS: Record<string, [string, string]> = {
-  '1-1': ['핵심 흐름 · 계산', '결제 화면에서 할인 뒤 금액이 0원으로 보여요 (틀림)'],
-  '1-2': ['화면 전환 · 뒤로 가기', '설정에서 뒤로 가면 앱이 꺼져요 (앱 죽음)'],
-  '1-3': ['데이터 · 오프라인', '비행기 모드에서 저장하면 글이 사라져요 (문제 소지)'],
-  '2-1': ['경계값 · 시간', '자정에 날짜가 하루 늦게 바뀌어요 (틀림)'],
-  '2-2': ['큰 글씨 · 다크 모드', '글씨 2배에서 버튼 글자가 잘려요 (어려움)'],
-  '2-3': ['권한 · 정책', '위치 권한을 거절하면 빈 화면만 나와요 (문제 소지)'],
-  '3-1': ['처음 쓰는 20대', '「포인트」 가 어디 있는지 한참 찾았어요 (어려움)'],
-  '3-2': ['처음 쓰는 40대', '「회차」 라는 말이 무슨 뜻인지 몰랐어요 (이해 안 감)'],
-  '3-3': ['처음 쓰는 50대', '가입 버튼이 너무 작아 두 번 잘못 눌렀어요 (어려움)'],
-}
-
-function member(team: number, n: number, t0: number): [number, Run][] {
-  const no = `${team}-${n}`
-  const id = `qa-${no}`
-  const [focus, found] = FOCUS[no]!
-  return [
-    [t0, hire(id, 'general-purpose', `QA ${team}팀 ${no} ${focus}`)],
-    [t0 + 2800, tool(id, 'Bash', team === 3 ? 'adb -s 테스트폰 shell input tap' : 'adb shell monkey -p app 500')],
-    [t0 + 5000, done2(id, 'Bash', 'Read', `/app/build/qa/${no}/screen.png`)],
-    [t0 + 7000, done2(id, 'Read', 'SubagentHandback')],
-    [t0 + 8200, all(report(id, found), use(id, tk(5000, 42000 + n * 9000, 3000, 3500), 40000 + n * 18000))],
-  ]
-}
-
-const QA_GAP = 14500 // 한 팀원 일 + 보고 + 퇴근 뒤 다음 팀원이 들어오기까지
-const QA_END = 1500 + 5600 + 1500 + 1500 + 3 * QA_GAP
-
-export const QA_STEPS: Step[] = timeline([
-  [1200, O((o, n) => onPrompt(o, 'QA 돌려줘 — 3팀 × 3명', n))],
-  // 팀장이 「qa-checklist」 책을 본다 — QA 직원이 아직 없으니 팀장이 직접 책장에 다녀온다
-  [2700, tool('main', 'Skill', 'qa-checklist')],
-  [8300, done2('main', 'Skill', 'Bash', 'adb devices')],
-  [9800, all(done('main', 'Bash', 'adb devices'), P(p => ({ ...p, lead: fill(52000) })))],
-  ...[1, 2, 3].flatMap(team => [1, 2, 3].flatMap(n => member(team, n, 10500 + (team - 1) * 700 + (n - 1) * QA_GAP))),
-  [QA_END + 2500, tool('main', 'Write', '/app/build/qa/report.md')],
-  [QA_END + 4500, done('main', 'Write', '/app/build/qa/report.md')],
-  [QA_END + 6000, all(report(undefined, 'QA 3팀 × 3명 끝: 앱 죽음 1 · 틀림 2 · 문제 소지 2 · 어려움 3 · 이해 안 감 1. 보고서 build/qa/report.md'),
-    use('main', tk(14000, 210000, 9000, 16000), 128000))],
-])
 
 /** 다 끝난 장면을 이만큼 보여 준 뒤 실제 사무실로 돌아간다 */
 export const HOLD = 10000

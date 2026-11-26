@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { QA_STEPS } from '../hooks/demo'
+import { STEPS } from '../hooks/demo'
 
 import { boardOf, EMPTY, familyOfW, fold, foldSteps, LINGER_MS, onComplete, webSeats, onPrompt, onSpawn, onToolStart, unitOf, unitsOf } from '../hooks/office'
 import type { Spawn } from '../hooks/office'
@@ -110,15 +110,15 @@ test('패널: 넓고 높으면 2배 그림 (이름표 · 말풍선 자리도 2�
   on('ui.panes', () => ({ value: [{ id: 'office', title: '사무실', isShown: true, isFocused: false, isPlaced: true }] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'termimates', args: '시연 qa', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
-  await clock.advance(QA_STEPS.reduce((n, s) => n + s.wait, 0) + 10)
+  await $.command.run({ command: 'termimates', args: '시연', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await clock.advance(STEPS.reduce((n, s) => n + s.wait, 0) + 10)
   const pane = (cols: number, rows: number) => ({
     plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
     props: { title: '사무실', isFocused: false, bodyColumns: cols, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} },
   }) as const
   let ui = await $.ui.mount(pane(160, 100))
   expect((await ui.find({ type: 'Raster' }))?.props.rows).toBe(52) // 1배 26줄 → 2배
-  expect((await ui.find({ key: 'pick-QA 1팀' }))?.text).toContain('QA 1팀')
+  expect((await ui.find({ key: 'pick-리서처' }))?.text).toBeTruthy() // 회원가입 시연: 조사 직원 자리
   await ui.unmount()
   ui = await $.ui.mount(pane(160, 40))
   expect((await ui.find({ type: 'Raster' }))?.props.rows).toBe(26)

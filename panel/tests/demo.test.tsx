@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { HOLD, STEPS } from '../hooks/demo'
+import { HOLD, startDemo, STEPS } from '../hooks/demo'
 
 const PANE = {
   plugin: 'termimates',
@@ -83,5 +83,26 @@ test('/termimates 시연 을 다시 치면 그 자리에서 멈춘다', async ($
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /▶ 시연 중/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/termimates 시연: 검토하는 동안 QA 1팀 두 명이 한 자리(팀 묶음)로 보인다', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 25, 12, 0, 0) })
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'office', title: '사무실', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'termimates', args: '시연', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  // QA 두 명이 일하는 장면까지 (팀원 둘 다 출근해 Bash 를 돌리는 단계)
+  let d = startDemo(0)
+  const i = STEPS.findIndex(s => (d = s.run(d, 0)).office.workers.some(w => w.team === '1'))
+  expect(i).toBeGreaterThan(0)
+  await clock.advance(STEPS.slice(0, i + 2).reduce((t, s) => t + s.wait, 0) + 10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ key: 'pick-QA 1팀' }))?.text).toContain('QA 1팀')
+  expect(await ui.find({ key: 'pick-QA 1팀#2' })).toBeUndefined() // 팀원 둘이 나란히 두 자리가 아니라 팀 한 자리
+  await ui.press({ key: 'pick-QA 1팀' })
+  expect((await ui.find({ type: 'Text', text: /팀원 2명 · 일하는 중 2명/ }))?.text).toBeTruthy()
   await ui.unmount()
 })
