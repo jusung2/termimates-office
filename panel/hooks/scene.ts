@@ -373,13 +373,13 @@ function bookAt(b: Px, x: number, y: number, color: number) {
   dot(b, Math.round(x) + 1, Math.round(y), C.page)
 }
 
-const TRIP_MS = 4400 // 서류 들고 팀장에게 갔다 오기
+const TRIP_MS = 6000 // 서류 들고 팀장에게 갔다 오기
 const ASSIGN_MS = 1300 // 일 맡길 때 서류가 날아가는 시간
-const SHELF_MS = 5200 // 책장에 가서 책 꺼내 오기
+const SHELF_MS = 7500 // 책장에 가서 책 꺼내 오기
 const READ_MS = 4000 // 돌아와 자리에서 그 책을 펴 읽기
-const ARRIVE_MS = 2600 // 문으로 들어와 자리에 앉기
-const LEAVE_MS = 2600 // 자리에서 일어나 문으로 퇴근
-const BOSS_MS = 6000 // 사장님이 문으로 들어와 팀장에게 지시서를 건네고 나가기
+const ARRIVE_MS = 3500 // 문으로 들어와 자리에 앉기
+const LEAVE_MS = 3500 // 자리에서 일어나 문으로 퇴근
+const BOSS_MS = 8000 // 사장님이 문으로 들어와 팀장에게 지시서를 건네고 나가기
 
 /** 사장님 지시가 들어온 직후: 사장님이 복도를 걸어 팀장 책상 앞까지 와서 지시서를 건네고 돌아간다 */
 function bossOf(o: Office, L: Layout, now: number): Motion | undefined {

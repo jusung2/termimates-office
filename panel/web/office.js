@@ -12,8 +12,9 @@
   const world = document.createElement('canvas'), wctx = world.getContext('2d');
   const bg = document.createElement('canvas'), bctx = bg.getContext('2d');
 
-  // ---- 시간 규칙 (패널 scene.ts 와 같게) ----
-  const TRIP_MS = 4400, ASSIGN_MS = 1300, SHELF_MS = 5200, READ_MS = 4000, ARRIVE_MS = 3200, LEAVE_MS = 3200, BOSS_MS = 7000;
+  // ---- 시간 규칙 ----
+  const ASSIGN_MS = 1300, READ_MS = 4000, BOSS_MS = 7000;
+  const WALK_SPEED = 0.09; // 걷는 속도 (월드 픽셀/ms). 거리 ÷ WALK_SPEED = 순수 걷기 시간.
 
   // ---- 배치 치수 (월드 픽셀 = 캐릭터 픽셀) ----
   const SLOT_W = 100, ROW_H = 128, WALL_H = 72, SIDE = 64, RIGHT = 16, SHELF_W = 112, MIN_W = 380;
@@ -408,28 +409,43 @@
     const id = s.lead ? 'main' : w.id;
     const h = s.lead ? null : [...(o.handoffs || [])].reverse().find((x) => x.from === w.id);
     const hAge = h ? now - h.at : -1;
-    if (h && hAge >= 0 && hAge < TRIP_MS) {
-      const pts = toHall(s, L.lead.cx + 34), t = hAge / TRIP_MS;
-      if (t < 0.4) return { m: { pts, p: ease(t / 0.4), carry: 'doc' } };
-      if (t < 0.6) return { m: { pts, p: 1, give: ease((t - 0.4) / 0.2) } };
-      return { m: { pts, p: 1 - ease((t - 0.6) / 0.4) } };
+    // 보고: 자리 → 팀장 앞 → 돌아옴 (거리 기반 시간)
+    if (h && hAge >= 0) {
+      const pts = toHall(s, L.lead.cx + 34), tripMs = lenOf(pts) / (WALK_SPEED * 0.4);
+      if (hAge < tripMs) {
+        const t = hAge / tripMs;
+        if (t < 0.4) return { m: { pts, p: ease(t / 0.4), carry: 'doc' } };
+        if (t < 0.6) return { m: { pts, p: 1, give: ease((t - 0.4) / 0.2) } };
+        return { m: { pts, p: 1 - ease((t - 0.6) / 0.4) } };
+      }
     }
+    // 퇴근: 보고 끝난 뒤 문으로
     if (w.ended != null && !s.lead) {
-      const leaveAt = w.ended + (h && h.at >= w.ended - 1000 ? TRIP_MS : 0) + 1500, lAge = now - leaveAt;
-      if (lAge >= LEAVE_MS) return { gone: true };
-      if (lAge >= 0) return { m: { pts: toDoor(s), p: ease(lAge / LEAVE_MS) } };
+      const leavePts = toDoor(s), leaveMs = lenOf(leavePts) / WALK_SPEED;
+      const tripMs = h ? lenOf(toHall(s, L.lead.cx + 34)) / (WALK_SPEED * 0.4) : 0;
+      const leaveAt = w.ended + (h && h.at >= w.ended - 1000 ? tripMs : 0) + 1500, lAge = now - leaveAt;
+      if (lAge >= leaveMs) return { gone: true };
+      if (lAge >= 0) return { m: { pts: leavePts, p: ease(lAge / leaveMs) } };
     }
+    // 책장: 스킬을 쓰면 갔다 옴
     const sh = [...(o.shelf || [])].reverse().find((x) => x.who === id);
     const sAge = sh ? now - sh.at : -1;
-    if (sh && sAge >= 0 && sAge < SHELF_MS) {
-      const pts = toHall(s, L.shelf.x + 40), t = sAge / SHELF_MS;
-      if (t < 0.4) return { m: { pts, p: ease(t / 0.4) } };
-      if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.48 ? 'book' : null, reach: true } };
-      return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'book' } };
+    if (sh && sAge >= 0) {
+      const pts = toHall(s, L.shelf.x + 40), shelfMs = lenOf(pts) / (WALK_SPEED * 0.4);
+      if (sAge < shelfMs) {
+        const t = sAge / shelfMs;
+        if (t < 0.4) return { m: { pts, p: ease(t / 0.4) } };
+        if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.48 ? 'book' : null, reach: true } };
+        return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'book' } };
+      }
     }
+    // 출근: 문에서 자리로
     if (!s.lead) {
       const aAge = now - w.started;
-      if (aAge >= 0 && aAge < ARRIVE_MS) return { m: { pts: toDoor(s), p: 1 - ease(aAge / ARRIVE_MS) } };
+      if (aAge >= 0) {
+        const arrivePts = toDoor(s), arriveMs = lenOf(arrivePts) / WALK_SPEED;
+        if (aAge < arriveMs) return { m: { pts: arrivePts, p: 1 - ease(aAge / arriveMs) } };
+      }
     }
     return {};
   }
@@ -508,8 +524,10 @@
 
     const moves = new Map(), gone = new Set();
     for (const s of L.seats) { const r = motionOf(o, s, now); if (r.m) moves.set(s.key, r.m); if (r.gone) gone.add(s.key); }
-    const taken = new Set((o.shelf || []).filter((x) => now - x.at >= SHELF_MS * 0.46 && now - x.at < SHELF_MS + READ_MS).map((x) => slotOf(x.book)));
-    const readers = new Set((o.shelf || []).filter((x) => now - x.at >= SHELF_MS && now - x.at < SHELF_MS + READ_MS).map((x) => x.who));
+    // 책장: 자리마다 거리가 달라 shelfMs 를 직접 계산한다
+    const shelfMsFor = (who) => { const seat = L.seats.find((s) => !!s.worker && (s.lead ? 'main' : s.worker.id) === who); return seat ? lenOf(toHall(seat, L.shelf.x + 40)) / (WALK_SPEED * 0.4) : 15000; };
+    const taken = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm * 0.46 && now - x.at < sm + READ_MS; }).map((x) => slotOf(x.book)));
+    const readers = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm && now - x.at < sm + READ_MS; }).map((x) => x.who));
 
     // 사장님 지시가 막 들어왔으면: 사장님이 문으로 들어와 팀장에게 지시서를 건네고 나간다
     let boss = null;
@@ -1000,7 +1018,7 @@
     rows.push('<div class="note">말 걸기는 Claude Code 옆 패널에서 이 직원을 눌러서 해요 (보낼 때만 토큰이 들어요).</div>');
     $('cardBody').innerHTML = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>${esc(head)}</h2><div class="kind">${esc(kind)}</div></div></div>${rows.join('')}`;
     const f = $('cardFace'), fc = f && f.getContext('2d');
-    if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get(look, { pose: who ? poseOf(who, false) : 'idle', frame: Math.floor(now / 350), expr: 'normal' }), 0, 0); }
+    if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); const cardPct = sel === 'main' ? pctOf(pw.lead) : (who ? pctOf(pw.workers && pw.workers[who.id]) : null); const cardPose = who ? poseOf(who, false) : 'idle'; fc.drawImage(S.get(look, { pose: cardPose, frame: Math.floor(now / 350), expr: exprOf(cardPct, who, now), sweat: cardPose === 'sweat' || (cardPct != null && cardPct >= 70) }), 0, 0); }
     el.hidden = false;
   }
 

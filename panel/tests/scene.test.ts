@@ -16,6 +16,6 @@ test('서류 들고 걷기 · 서류 날리기: 가는 내내 그림이 깨지�
     }
   }
   expect(isMoving(o, t0 + 2500)).toBe(true) // 서류 들고 걷는 중
-  expect(isMoving(o, t0 + 2000 + 7000)).toBe(true) // 보고 다녀와서 문으로 퇴근하는 중
-  expect(isMoving(o, t0 + 2000 + 9000)).toBe(false) // 다 끝남
+  expect(isMoving(o, t0 + 2000 + 9000)).toBe(true) // 보고 다녀와서 문으로 퇴근하는 중 (TRIP_MS 6000 + LEAVE_MS 3500 = 9500 → 아직 걷는 중)
+  expect(isMoving(o, t0 + 2000 + 12000)).toBe(false) // 다 끝남 (12000 ≥ 9500 + 1500 = 11000)
 })
