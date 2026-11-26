@@ -36,3 +36,30 @@ test('/termimates 웹: 주소를 알려 주고, 사무실 상태를 이 컴퓨�
   await $.command.run({ command: 'termimates', args: '웹', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
   expect(store['web:/work/a']).toBe(false)
 })
+
+test('/reload-plugins 뒤 (세션 시작 없이 모듈만 새로): 웹을 켜 둔 프로젝트면 처음 오는 이벤트에서 스냅샷을 이어 쓰고, 브라우저는 안 연다', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 26, 3, 0, 0) })
+  const store: Record<string, unknown> = { welcomed: true, 'web:/work/a': true }
+  const files: Record<string, string> = {}
+  const runs: string[][] = []
+  let opened = 0
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('session.cwd', () => ({ value: '/work/a' }))
+  on('session.id', () => ({ value: 'sess-r' }))
+  on('store.get', (_, e) => ({ value: store[e.key] }))
+  on('store.set', (_, e) => { store[e.key] = e.value; return { value: undefined } })
+  on('store.keys', () => ({ value: Object.keys(store) }))
+  on('process.run', (_, e) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '/Users/me\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
+  on('fs.write', (_, e) => { files[e.path] = e.text; return { value: undefined } })
+  on('ui.open', () => { opened++; return { value: { isPlaced: true } } })
+  on('ui.panes', () => ({ value: [] }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  // 세션 시작 이벤트 없이 바로 사장님 지시가 온다
+  await $.prompt.submit({ text: '시연 보여 줘', wait: false, origin: { kind: 'composer' } })
+  await clock.advance(1000)
+  const body = files['/Users/me/.termimates/panel/sess-r.json']
+  expect(body).toBeTruthy()
+  expect(JSON.parse(body!).project).toBe('/work/a')
+  expect(runs.some(a => a[0] === '/usr/bin/open' || a[0] === 'xdg-open')).toBe(false) // 브라우저는 사람이 켤 때만
+  expect(opened).toBe(0) // 창 · 안내도 다시 안 연다
+})
