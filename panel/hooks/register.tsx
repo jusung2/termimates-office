@@ -9,7 +9,7 @@ import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
 import { HOLD, IDLE_DEMO, startDemo, STEPS } from './demo'
 import {
   addUsage, boardOf, donePaper, EMPTY, familyOfW, isAsk, jobOfW, log, onComplete, onMissed, onPrompt, onRename, onSpawn, onStart, onTalk,
-  onTodoMarks, onTodos, onToolEnd, onToolStart, onTurnStart, onWait, onWaitEnd, paperLine, PICK_MS, pickPaper, readerOf, reviewLine,
+  onTodoMarks, onTodos, settleIdle, onToolEnd, onToolStart, onTurnStart, onWait, onWaitEnd, paperLine, PICK_MS, pickPaper, readerOf, reviewLine,
   running, set, toShelf, unitOf, unitsOf, webSeats,
 } from './office'
 import {
@@ -645,6 +645,7 @@ async function boot($: EngineInterface, cwd: string, fresh: boolean) {
       argumentHint: '[도움말 | 웹 | 시연]', immediate: true,
     })
     if (fresh) await change($, onStart)
+    await change($, o => settleIdle(o)) // 예전 규칙으로 남은 「쉬는 중」 팀원 퇴근 (/reload-plugins 뒤에도)
     await startPower($)
     void loadLocalNotes($)
     void loadNames($)
