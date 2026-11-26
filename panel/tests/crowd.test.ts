@@ -1,9 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { EMPTY, familyOfW, jobOfW, LINGER_MS, onComplete, onPrompt, onSpawn, onToolStart, onTurnStart, settleIdle, unitOf, unitsOf } from '../hooks/office'
+import { EMPTY, familyOfW, jobOfW, LINGER_MS, onComplete, onMissed, onPrompt, onSpawn, onTodoMarks, onToolStart, onTurnStart, settleIdle, unitOf, unitsOf } from '../hooks/office'
 import type { Spawn } from '../hooks/office'
 import { tagText } from '../hooks/register'
-import { CW, layout, outOf, plan } from '../hooks/scene'
+import { CH, COMPACT_WALL, CW, draw, layout, outOf, paperSpots, plan, TAG_ROW } from '../hooks/scene'
 import { jobOf } from '../hooks/words'
 import type { Worker } from '../types'
 
@@ -134,5 +134,112 @@ test('역할별 섬 (터미널): 섬 아래 이름표 하나 「디자이너 ×3
   // 섬 이름표를 누를 때마다 섬 안 자리를 차례로 고른다
   await ui.press({ key: btns.find(b => b.text === '디자이너 ×3')!.key! })
   expect((await ui.findAll({ type: 'Button' })).find(b => b.key?.startsWith('isle-btn-') && b.text === '디자이너 ×3')).toBeDefined()
+  await ui.unmount()
+})
+
+test('촘촘한 윗부분: 붐벼서 보통 높이로는 섬이 안 들어갈 때만 벽 · 팀장 위쪽을 줄여 1.5배 섬, 들어가면 · 적으면 지금 그대로', () => {
+  const lay = (n: number, w: number, r: number) => {
+    const o = crowd(n)
+    const us = unitsOf(o, 4000)
+    const p = plan(us, w, r)
+    return { p, L: layout(o, w, unitOf, familyOfW, { spots: p.spots, units: us, k: p.k, isles: p.isles, compact: p.compact }) }
+  }
+  // 113칸: 10 · 12명은 1.5배 섬이 세 줄 → 보통 윗부분은 66줄, 촘촘하면 62줄부터
+  for (const n of [10, 12]) {
+    const { p, L } = lay(n, 113, 62)
+    expect(p.k).toBe(1.5)
+    expect(p.compact).toBe(true)
+    expect(p.isles!.length).toBe(3)
+    expect(outOf(L).rows).toBeLessThanOrEqual(62)
+    expect(L.wall).toBe(COMPACT_WALL)
+    expect(L.seats[0]!.row).toBe(0) // 팀장 말풍선 줄이 벽 위
+    expect(L.top).toBe(14)
+    expect(Math.min(...L.seats.slice(1).map(s => s.row))).toBe(L.top)
+    expect(plan(unitsOf(crowd(n), 4000), 113, 61).k).toBe(1) // 그보다 낮으면 예전처럼 1배
+  }
+  // 섬 두 줄(7명)은 48줄부터 (보통이면 53줄)
+  expect(lay(7, 113, 48).p).toMatchObject({ k: 1.5, compact: true })
+  // 보통 윗부분으로 들어가면 그대로 (113 × 70 은 10명도 보통)
+  for (const n of [10, 12]) {
+    const { p, L } = lay(n, 113, 70)
+    expect(p.compact).toBeUndefined()
+    expect([L.wall, L.top, L.seats[0]!.row]).toEqual([3, 17, 3])
+  }
+  // 113 × 38 · 40 은 1.5배 섬이 세 줄이라 촘촘해도 안 들어감 → 예전처럼 1배 (윗부분도 그대로)
+  for (const r of [38, 40]) {
+    const { p, L } = lay(10, 113, r)
+    expect(p.k).toBe(1)
+    expect(p.compact).toBeUndefined()
+    expect([L.wall, L.top]).toEqual([3, 17])
+  }
+  // 적을 때(2명 · 6명)는 어떤 크기에서도 촘촘하지 않음
+  for (const n of [2, 6]) for (const [w, r] of [[113, 38], [113, 40], [113, 70], [56, 70], [160, 90]] as const) {
+    const { p, L } = lay(n, w, r)
+    expect(p.compact).toBeUndefined()
+    expect([L.wall, L.top]).toEqual([3, 17])
+  }
+  // 섬이 아닌데 compact 만 넘겨도 무시
+  const o = crowd(6)
+  const us = unitsOf(o, 4000)
+  const q = plan(us, 113, 40)
+  expect(layout(o, 113, unitOf, familyOfW, { spots: q.spots, units: us, k: q.k, compact: true }).top).toBe(17)
+})
+
+test('촘촘한 윗부분에서도 걷는 길 · 서류 · 사람이 겹치지 않음: 복도는 팀장 이름표 아래 ~ 첫 직원 줄 위, 서류는 그 복도 · 통로 바닥', () => {
+  let o = crowd(10)
+  o = onTodoMarks(o, 'c4', 'TodoWrite', { todos: [{ content: '아이콘', status: 'pending' }] }) // 둘째 섬 줄 개발자
+  o = onMissed(o, 'c4', '', false, 5000)
+  o = onTodoMarks(o, 'main', 'TodoWrite', { todos: [{ content: 'R', status: 'in_progress' }] })
+  o = onMissed(o, undefined, '', false, 5000)
+  const us = unitsOf(o, 6000)
+  const p = plan(us, 113, 62)
+  expect(p.compact).toBe(true)
+  const L = layout(o, 113, unitOf, familyOfW, { spots: p.spots, units: us, k: p.k, isles: p.isles, compact: p.compact })
+  const lead = L.seats[0]!
+  const hallFoot = L.top * 2 - 1, standTop = hallFoot - 11 // 복도에 선 사람 (픽셀)
+  expect(standTop).toBeGreaterThanOrEqual((lead.row + TAG_ROW + 1) * 2) // 팀장 이름표 줄을 안 덮는다
+  const ps = paperSpots(o, L)
+  expect(ps.length).toBe(2)
+  const mainPaper = ps.find(x => x.p.who === 'main')!
+  expect(mainPaper.k).toBe(0)
+  expect(mainPaper.y + 3).toBe(hallFoot) // 큰 복도 바닥 (종이 두 줄 + 그림자 한 줄 바로 아래가 발 높이)
+  const seatPaper = ps.find(x => x.p.who === 'c4')!
+  const s = L.seats.find(x => x.ids?.includes('c4'))!
+  expect(seatPaper.k).toBeGreaterThan(0)
+  expect(seatPaper.y).toBeGreaterThanOrEqual((s.row - CH + TAG_ROW) * 2) // 앞줄 이름표 줄부터 (보통 윗부분과 같은 자리)
+  expect(seatPaper.y + 3).toBeLessThanOrEqual(s.row * 2 + 2) // 그 자리 사람 머리 위 통로
+  // 그림이 그려지고(색 칸이 다 채워짐) 크기는 layout 그대로
+  const px = draw({ ...o, promptAt: 5500, handoffs: [{ at: 5800, from: 'c9', preview: '' }], shelf: [{ at: 5500, who: 'c3', book: 'x' }] }, L, 6500, 14)
+  expect(px.length).toBe(L.cols * L.rows * 2)
+  expect([...px].every(c => c !== 0)).toBe(true)
+})
+
+test('촘촘한 윗부분 (패널): 그림 몫이 보통 섬 높이보다 낮아도 1.5배 섬 · 섬 이름표 · 책장 단추가 그대로', async ($, on) => {
+  mock.clock(on, { now: Date.UTC(2026, 10, 24, 5, 0, 0) })
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', (_, e) => ({ model: 'claude-sonnet-5-5', agentId: 'a-' + e.tool_use_id }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '회원가입', wait: false, origin: { kind: 'composer' } })
+  const types = ['designer', 'designer', 'designer', 'executor', 'executor', 'executor', 'executor', 'verifier', 'Explore', 'planner']
+  for (const [i, t] of types.entries()) {
+    await $.agent.spawn({ tool_use_id: 't' + i, prompt: '일', description: t === 'designer' ? '시안' : t === 'executor' ? '구현' : `일 ${i}`, subagentType: t,
+      provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false })
+  }
+  const mount = (rows: number) => $.ui.mount({ plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
+    props: { title: '사무실', isFocused: false, bodyColumns: 113, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} } })
+  await (await mount(120)).unmount() // 카드 높이를 한 번 재 둔다 (그림 몫 = 패널 높이 - 위 글줄 - 카드)
+  // 패널 89줄: 그림 몫이 62~65줄 → 보통 윗부분 섬(66줄)은 안 들어가고 촘촘한 윗부분으로 61줄
+  const ui = await mount(89)
+  const [r] = await ui.findAll({ type: 'Raster' })
+  expect(r!.props.rows).toBe(61)
+  expect(r!.props.columns).toBe(112)
+  const btns = await ui.findAll({ type: 'Button' })
+  expect(btns.filter(b => b.key?.startsWith('isle-btn-')).map(b => b.text)).toEqual(expect.arrayContaining(['디자이너 ×3', '개발자 ×4']))
+  expect(btns.find(b => b.key === 'shelf')?.text).toContain('책장')
+  expect(btns.find(b => b.key === 'pick-main')).toBeDefined()
   await ui.unmount()
 })

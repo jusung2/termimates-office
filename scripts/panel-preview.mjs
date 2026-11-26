@@ -41,7 +41,7 @@ const frames = []
 for (const [cols, budget, dt] of [[+width, +rows, 0], [+width, +rows, 700], [Math.floor(+width / 2), +rows, 0], [+width, 70, 0]]) {
   const units = office.unitsOf(o, now + dt)
   const p = scene.plan(units, cols, budget)
-  const L = scene.layout(o, cols, office.unitOf, office.familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles })
+  const L = scene.layout(o, cols, office.unitOf, office.familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles, compact: p.compact })
   const size = scene.outOf(L)
   frames.push({ L: { cols: size.cols, rows: size.rows }, px: scene.zoom(scene.draw(o, L, now + dt, 14), L) })
   console.log(`${cols}칸 · 그림 몫 ${budget}줄 → 배율 ${p.k} · ${size.cols}×${size.rows} · 자리 ${p.spots.map((x) => x.label).join(', ')}`)
