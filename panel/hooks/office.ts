@@ -135,10 +135,22 @@ export function toShelf(o: Office, who: string, book: string, now: number): Offi
   return { ...o, shelf: [...(o.shelf ?? []), { at: now, who, book }].slice(-20) }
 }
 
+/** 퇴근한 팀원(teammate)이 메시지를 받아 다시 일함 → 다시 출근 (새로 온 사람처럼 문에서 걸어 들어온다) */
+const comeBack = (w: Worker, now: number): Worker =>
+  w.teammate && w.ended !== undefined ? log({ ...w, ended: undefined, started: now }, now, '다시 출근') : w
+
+/** 예전 규칙으로 저장된 사무실: 일 끝낸 팀원이 「쉬는 중」 으로 퇴근 없이 남아 있으면 그때 끝난 것으로 (그 자리가 비게) */
+export function settleIdle(o: Office): Office {
+  if (!o.workers.some(w => w.teammate && w.status === 'idle' && w.ended === undefined)) return o
+  return { ...o, workers: o.workers.map(w => (w.teammate && w.status === 'idle' && w.ended === undefined ? { ...w, ended: w.since } : w)) }
+}
+
 /** 한 차례 시작 (who: 'main' 또는 직원 id) */
 export function onTurnStart(o: Office, who: string, now: number): Office {
-  return withWorker(o, who, now, w =>
-    w.status === 'work' ? w : set(w, 'think', who !== 'main' ? '일을 받아 시작하는 중' : '생각하는 중', now))
+  return withWorker(o, who, now, w0 => {
+    const w = comeBack(w0, now)
+    return w.status === 'work' ? w : set(w, 'think', who !== 'main' ? '일을 받아 시작하는 중' : '생각하는 중', now)
+  })
 }
 
 /** 도구를 쓰기 시작 */
@@ -147,7 +159,7 @@ export function onToolStart(o: Office, who: string, tool: string, target: string
   if (tool === 'Skill') o = toShelf(o, readerOf(o, who, target ?? ''), target ?? '', now)
   return tool === 'SubagentHandback'
     ? withWorker(o, who, now, w => set(w, 'handoff', '팀장에게 서류 넘기는 중', now))
-    : withWorker(o, who, now, w => set(w, 'work', actionText(tool, target, sub), now, tool, target))
+    : withWorker(o, who, now, w => set(comeBack(w, now), 'work', actionText(tool, target, sub), now, tool, target))
 }
 
 /** 도구가 끝남 (실패면 errText) */
@@ -201,8 +213,8 @@ export function onSpawn(o: Office, s: Spawn, now: number): Office {
   const checker = isChecker(s.type, `${s.description} ${s.name ?? ''}`)
   const w0: Worker = had ?? { ...fresh(s.id, s.type, now), status: 'think', action: '일을 받아 시작하는 중' }
   const text = `${s.description} ${s.name ?? ''} ${(s.prompt ?? '').slice(0, 300)}`
-  const w = log({ ...w0, role: s.type, name: s.name, task: s.description, background: s.background,
-    teammate: s.teammate === true, started: had?.started ?? now,
+  const w = log({ ...w0, ended: undefined, role: s.type, name: s.name, task: s.description, background: s.background,
+    teammate: s.teammate === true, started: had && had.ended === undefined ? had.started : now,
     job: jobOf(s.type, text), family: familyOf(s.type, text), team: teamOf(text), member: memberOf(text),
     parent: s.parentAgentId, checker: checker || undefined, reviewOf: checker ? had?.reviewOf ?? guessTarget(o, s) : undefined,
     ...roleBadge(s) }, now, `출근: ${s.description}`)
@@ -244,10 +256,13 @@ export function onComplete(o: Office, id: string | undefined, answer: string, ab
     const w = o.workers.find(x => x.id === id)
     if (!w) return o
     const paper = clip(answer, 200)
-    const done: Worker = w.teammate
-      ? set({ ...w, handback: paper || w.handback }, 'idle', '일 끝, 다음 일 기다리는 중', now)
-      : { ...set({ ...w, handback: paper || w.handback }, aborted ? 'unfinished' : 'done', aborted ? '멈춤' : '보고 완료', now),
-        ended: now }
+    // 팀원(teammate)도 한 차례가 끝나면 서류 보고 → 퇴근 (예전엔 「쉬는 중」 으로 자리에 계속 남아 몇 시간씩 자리를 차지했다).
+    // 팀원은 메시지를 받으면 같은 id 로 다시 일하니, 그때 다시 출근한다 (comeBack)
+    const done: Worker = {
+      ...set({ ...w, handback: paper || w.handback }, aborted ? 'unfinished' : 'done',
+        aborted ? '멈춤' : w.teammate ? '보고 완료 (부르면 다시 와요)' : '보고 완료', now),
+      ended: now,
+    }
     let out: Office = { ...o, workers: o.workers.map(x => (x.id === id ? log(done, now, '보고 완료') : x)) }
     if (w.checker && !aborted) {
       const rv = addReview(out, w, answer, now)

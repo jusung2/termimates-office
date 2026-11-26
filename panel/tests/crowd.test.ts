@@ -1,10 +1,12 @@
 import { expect, test } from 'claude-code/testing'
 
-import { jobOfW } from '../hooks/office'
+import { EMPTY, jobOfW, LINGER_MS, onComplete, onPrompt, onSpawn, onToolStart, onTurnStart, settleIdle, unitsOf } from '../hooks/office'
+import type { Spawn } from '../hooks/office'
 import { tagText } from '../hooks/register'
 import { jobOf } from '../hooks/words'
 import type { Worker } from '../types'
 
+const sp = (id: string, type: string, description: string, x: Partial<Spawn> = {}): Spawn => ({ id, type, description, background: true, ...x })
 // 한글 · 한자는 두 칸, 「…」 같은 문장 부호(0x2000~0x2e7f)는 한 칸 (register.tsx dw 와 같은 셈)
 const dw = (s: string) => [...s].reduce((n, ch) => { const c = ch.codePointAt(0) ?? 0; return n + (c > 0x1100 && !(c >= 0x2000 && c < 0x2e80) ? 2 : 1) }, 0)
 
@@ -32,4 +34,33 @@ test('표준 이름(designer · executor)은 플러그인 접두사가 붙어도
   expect(jobOfW(old('oh-my-claudecode:designer', 'designer'))).toBe('디자이너')
   expect(jobOfW(old('copywriter', 'copywriter'))).toBe('copywriter') // 내가 지은 이름
   expect(jobOfW(old('designer', '시안 담당'))).toBe('시안 담당') // 사용자가 바꾼 이름
+})
+
+test('팀원(이름 붙여 부른 에이전트)도 한 차례 끝나면 서류 보고 → 퇴근, 메시지 받아 다시 일하면 다시 출근', () => {
+  let o = onPrompt(EMPTY, '시안', 1000)
+  for (const n of ['a', 'b', 'c']) o = onSpawn(o, sp(n, 'designer', `시안 ${n}`, { teammate: true, name: `plan-${n}` }), 2000)
+  o = onComplete(o, 'a', '시안 완료', false, 5000)
+  const a = o.workers.find(w => w.id === 'a')!
+  expect(a.status).toBe('done')
+  expect(a.ended).toBe(5000)
+  // 퇴근 걸음이 끝나면 자리에서 빠진다 (예전엔 몇 시간씩 「쉬는 중」 으로 남음)
+  const present = (t: number) => unitsOf(o, t).flatMap(u => u.present.map(w => w.id))
+  expect(present(5000 + LINGER_MS + 1000)).toEqual(['b', 'c'])
+  // SendMessage 로 다시 깨우면 같은 id 로 차례가 시작 → 다시 출근
+  o = onTurnStart(o, 'a', 60000)
+  const back = o.workers.find(w => w.id === 'a')!
+  expect(back.ended).toBeUndefined()
+  expect(back.started).toBe(60000)
+  expect(present(60001)).toContain('a')
+  o = onComplete(o, 'a', '또 완료', false, 70000)
+  o = onToolStart(o, 'a', 'Edit', 'x.ts', undefined, 80000) // 도구부터 와도 다시 출근
+  expect(o.workers.find(w => w.id === 'a')!.ended).toBeUndefined()
+})
+
+test('예전 규칙으로 저장된 「쉬는 중」 팀원은 다시 불러올 때 퇴근 처리 (일하는 팀원 · 일반 직원은 그대로)', () => {
+  const w = (id: string, x: Partial<Worker>): Worker => ({ id, role: 'designer', task: '', status: 'idle', action: '', since: 100, started: 0, background: true, recent: [], ...x })
+  const o = { ...EMPTY, workers: [w('t1', { teammate: true }), w('t2', { teammate: true, status: 'work' }), w('s1', { status: 'idle' })] }
+  const out = settleIdle(o)
+  expect(out.workers.map(x => x.ended)).toEqual([100, undefined, undefined])
+  expect(settleIdle(out)).toBe(out)
 })
