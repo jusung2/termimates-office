@@ -185,6 +185,8 @@ export type Seat = {
 
 export type Layout = {
   cols: number; rows: number; seats: Seat[]; shelfX: number
+  wall: number // 벽 높이(칸). 촘촘한 윗부분이면 COMPACT_WALL
+  top: number // 첫 직원 줄이 시작하는 칸 (큰 복도 바로 아래)
   keyOf: (w: Worker) => string // 그 직원이 앉는 자리 (역할 또는 「QA 1팀」)
   k: Scale // 그림 배율 (cols · rows · 자리 위치는 1배 기준, 화면 칸은 xOf · yOf 로)
   xs: number[] // 1배 칸 → 화면 칸 (길이 cols + 1, 마지막 = 화면 폭)
@@ -229,6 +231,13 @@ const SHELF_W = 13 // 오른쪽 책장 폭(픽셀)
 
 const STAFF_TOP = WALL + CH + HALL // 첫 직원 줄이 시작하는 칸
 
+// 촘촘한 윗부분 (붐벼서 섬 배치일 때만, 보통 높이로는 섬이 안 들어갈 때): 벽을 2칸으로(창문은 얇게),
+// 팀장 자리를 맨 위에 붙여 말풍선 · 머리가 벽 앞에 오게, 복도는 사람 키만큼 그대로 (팀장 이름표 바로 아래부터).
+// 팀장 · 출입문 · 복도 · 책장은 그대로 보이고 위쪽만 3칸 준다
+export const COMPACT_WALL = 2
+const COMPACT_LEAD = 0 // 팀장 자리 줄 (말풍선 줄이 벽 위)
+const COMPACT_TOP = COMPACT_LEAD + CH + HALL // 14
+
 const ORDER: Status[] = ['handoff', 'work', 'think', 'ask', 'wait_report', 'unfinished', 'done', 'idle', 'off', 'desk']
 
 export type Unit = { role: string; worker: Worker; count: number; list: Worker[] }
@@ -252,7 +261,7 @@ export function seatsOf(o: Office, keyOf: (w: Worker) => string = w => w.role): 
   return out // 처음 출근한 순서 그대로 (자리 고정)
 }
 
-export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale; isles?: IsleSeg[][] }
+export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale; isles?: IsleSeg[][]; compact?: boolean }
 
 /** 자리 하나에 들어갈 사람 (접은 자리 · +n 자리는 대표 한 명 또는 없음) */
 function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) => string): Omit<Seat, 'col' | 'row'> {
@@ -326,7 +335,7 @@ export function packIsles(isles: Isle[], avail: number, gap: number, max: number
 /** 터미널: 「2배 → 1.5배 → 1배 → 접기 → +n」. width · rows = 그림이 쓸 수 있는 칸 · 줄 수.
  *  사람이 적어 줄인 폭(width ÷ 배율)으로도 한 줄에 다 앉고 그 배율 높이가 들어가면 크게, 아니면 1배로 줄 수에 맞춰 접는다.
  *  파트장 아래 직원(boss 있음)은 터미널에선 안 그린다 (파트장 이름표의 「+n」 · 카드로) */
-export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale; spots: Spot[]; isles?: IsleSeg[][] } {
+export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale; spots: Spot[]; isles?: IsleSeg[][]; compact?: boolean } {
   const steps = foldSteps(units.filter(u => !u.boss))
   const first = steps[0] ?? []
   for (const k of [2, 1.5] as const) {
@@ -336,14 +345,18 @@ export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale
   // 한 줄로는 1배뿐: 역할별 섬을 두세 줄로 놓아 크게 그릴 수 있으면 그쪽 (큰 배율부터)
   if (first.length >= ISLE_MIN) {
     const isles = islesOf(first)
+    // 같은 배율이면 보통 윗부분 먼저, 안 들어가면 촘촘한 윗부분으로
     for (const k of [2, 1.5] as const) {
       const vw = Math.floor(width / k)
-      const fit = Math.min(ISLE_ROWS, Math.floor((Math.floor(rows / k) - STAFF_TOP) / CH))
-      if (vw < MIN_BIG || fit < 2) continue
-      const packed = packIsles(isles, vw - LEFT, isleGap(k), fit)
-      if (packed && packed.length >= 2) {
-        const order = packed.flat().flatMap(g => g.keys)
-        return { k, spots: order.map(key => first.find(x => x.key === key)!), isles: packed }
+      if (vw < MIN_BIG) continue
+      for (const top of [STAFF_TOP, COMPACT_TOP]) {
+        const fit = Math.min(ISLE_ROWS, Math.floor((Math.floor(rows / k) - top) / CH))
+        if (fit < 2) continue
+        const packed = packIsles(isles, vw - LEFT, isleGap(k), fit)
+        if (packed && packed.length >= 2) {
+          const order = packed.flat().flatMap(g => g.keys)
+          return { k, spots: order.map(key => first.find(x => x.key === key)!), isles: packed, ...(top === COMPACT_TOP ? { compact: true } : {}) }
+        }
       }
     }
   }
@@ -358,7 +371,11 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
   const shelfX = cols - SHELF_W - 2
   // 팀장은 가운데, 책장과 겹치면 왼쪽으로 (보고하러 온 직원이 설 자리도 남긴다)
   const leadCol = Math.max(LEFT, Math.min(Math.floor((cols - CW) / 2), shelfX - CW - 10))
-  const seats: Seat[] = [{ key: 'main', role: 'main', name: '팀장', col: leadCol, row: WALL, worker: o.lead, count: 0 }]
+  // 촘촘한 윗부분은 섬 배치에서만
+  const compact = !!(opts.compact && opts.isles && opts.spots)
+  const wall = compact ? COMPACT_WALL : WALL
+  const top = compact ? COMPACT_TOP : STAFF_TOP
+  const seats: Seat[] = [{ key: 'main', role: 'main', name: '팀장', col: leadCol, row: compact ? COMPACT_LEAD : WALL, worker: o.lead, count: 0 }]
   const staff: Omit<Seat, 'col' | 'row'>[] = opts.spots
     ? opts.spots.map(sp => seatOfSpot(o, sp, opts.units ?? [], jobOf))
     : seatsOf(o, keyOf).map(s => {
@@ -381,14 +398,14 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
       const total = row.reduce((n, g, j) => n + g.keys.length * CW + (j ? gap : 0), 0)
       let x = LEFT + Math.floor((cols - LEFT - total) / 2)
       if (k === 1.5) x += alignTo(leadCol, x, total, cols)
-      const top = STAFF_TOP + r * CH
+      const y = top + r * CH
       for (const g of row) {
-        isles.push({ name: g.isle.name, people: g.isle.people, first: g.first, other: !!g.isle.other, col: x, w: g.keys.length * CW, row: top, keys: g.keys })
-        g.keys.forEach((_, j) => seats.push({ ...staff[i++]!, col: x + j * CW, row: top }))
+        isles.push({ name: g.isle.name, people: g.isle.people, first: g.first, other: !!g.isle.other, col: x, w: g.keys.length * CW, row: y, keys: g.keys })
+        g.keys.forEach((_, j) => seats.push({ ...staff[i++]!, col: x + j * CW, row: y }))
         x += g.keys.length * CW + gap
       }
     })
-    return { cols, rows: STAFF_TOP + opts.isles.length * CH, seats, shelfX, keyOf, k, xs: colsMap(cols, k, leadCol), isles }
+    return { cols, rows: top + opts.isles.length * CH, seats, shelfX, wall, top, keyOf, k, xs: colsMap(cols, k, leadCol), isles }
   }
   staff.forEach((s, i) => {
     const r = Math.floor(i / perRow)
@@ -404,7 +421,7 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
     seats.push({ ...s, col: margin + c * st, row: STAFF_TOP + r * CH })
   })
   const staffRows = Math.max(1, Math.ceil(staff.length / perRow))
-  return { cols, rows: STAFF_TOP + staffRows * CH, seats, shelfX, keyOf, k, xs: colsMap(cols, k, leadCol) }
+  return { cols, rows: STAFF_TOP + staffRows * CH, seats, shelfX, wall, top, keyOf, k, xs: colsMap(cols, k, leadCol) }
 }
 
 /** 크게: 픽셀을 배율만큼 늘린다 (가로는 xs 무늬, 세로는 k 배). 글자는 그리는 쪽에서 xOf · yOf 로 위치만 옮긴다 */
@@ -450,20 +467,28 @@ function mix(a: number, b: number, t: number): number {
   return (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
-function room(b: Px, hour: number, now: number) {
+function room(b: Px, L: Layout, hour: number, now: number) {
+  const H = L.wall * 2
   // 바닥: 나무 판자
-  for (let y = WALL * 2; y < b.h; y++)
+  for (let y = H; y < b.h; y++)
     for (let x = 0; x < b.w; x++) {
-      const plank = Math.floor((y - WALL * 2) / 3)
+      const plank = Math.floor((y - H) / 3)
       const seamX = (x + (plank % 2) * 8) % 16 === 0
-      b.px[y * b.w + x] = (y - WALL * 2) % 3 === 2 || seamX ? C.seam : C.floor
+      b.px[y * b.w + x] = (y - H) % 3 === 2 || seamX ? C.seam : C.floor
     }
   // 벽 · 창문 · 걸레받이
-  fill(b, 0, 0, b.w, WALL * 2, C.wall)
+  fill(b, 0, 0, b.w, H, C.wall)
   fill(b, 0, 0, b.w, 1, C.molding)
-  fill(b, 0, WALL * 2 - 1, b.w, 1, C.base)
+  fill(b, 0, H - 1, b.w, 1, C.base)
   const isNight = hour < 6 || hour >= 19
   for (let x = 8; x + 10 < b.w - SHELF_W - 2; x += 26) {
+    if (L.wall < WALL) {
+      // 촘촘한 벽: 얇은 창문 띠 (유리 한 줄)
+      fill(b, x, 1, 10, 2, C.frame)
+      fill(b, x + 1, 1, 8, 1, isNight ? C.night : C.day)
+      fill(b, x + 5, 1, 1, 1, C.frame)
+      continue
+    }
     fill(b, x, 1, 10, 4, C.frame)
     fill(b, x + 1, 2, 8, 2, isNight ? C.night : C.day)
     fill(b, x + 5, 2, 1, 2, C.frame)
@@ -473,11 +498,11 @@ function room(b: Px, hour: number, now: number) {
 
 // 걷는 길의 발 높이 픽셀. 0 = 큰 복도(왼쪽 문 · 가운데 팀장 · 오른쪽 책장이 다 여기에 붙어 있음),
 // k(1~) = k번째 직원 줄 아래 좁은 통로
-const aisleFoot = (k: number) => (k === 0 ? STAFF_TOP * 2 - 1 : (STAFF_TOP + CH * (k - 1) + 8) * 2 + 1)
-const standY = (k: number) => aisleFoot(k) - 11 // 그 길에 선 사람의 머리 꼭대기
+const aisleFoot = (L: Layout, k: number) => (k === 0 ? L.top * 2 - 1 : (L.top + CH * (k - 1) + 8) * 2 + 1)
+const standY = (L: Layout, k: number) => aisleFoot(L, k) - 11 // 그 길에 선 사람의 머리 꼭대기
 const seatedY = (s: Seat) => s.row * 2 + 2
 const deskBottom = (s: Seat) => s.row * 2 + 13
-const rowOf = (s: Seat) => (s.key === 'main' ? 0 : Math.round((s.row - STAFF_TOP) / CH) + 1) // 0 = 팀장 줄
+const rowOf = (L: Layout, s: Seat) => (s.key === 'main' ? 0 : Math.round((s.row - L.top) / CH) + 1) // 0 = 팀장 줄
 const DOOR_X = -10 // 문 밖
 
 /** 의자 (늘 맨 뒤에 깐다) */
@@ -526,8 +551,10 @@ function seatUnit(b: Px, s: Seat, now: number, frame: number, present: boolean, 
 }
 
 /** 책장: 스킬 = 책. 꺼내 간 책 자리는 비어 있다. */
-function shelf(b: Px, x: number, out: Set<number>) {
-  const top = 3, h = 17
+const SHELF_H = 17
+const shelfTop = (L: Layout) => (L.wall < WALL ? 1 : 3) // 촘촘한 윗부분이면 두 픽셀 위로 (크기 · 칸은 그대로)
+function shelf(b: Px, x: number, top: number, out: Set<number>) {
+  const h = SHELF_H
   fill(b, x, top, SHELF_W, h, C.wood)
   const SPINES = [0xc2410c, 0x1971c2, 0x2f9e44, 0xe8590c, 0x7048e8, 0xd6336c, 0x0c8599, 0xf59f00]
   for (let shelfNo = 0; shelfNo < 3; shelfNo++) {
@@ -545,10 +572,10 @@ function shelf(b: Px, x: number, out: Set<number>) {
 const slotOf = (book: string) => (hash(book) % 3) * 16 + (hash(book + '#') % (SHELF_W - 2))
 
 /** 출입문 (왼쪽 벽). 나가는 사람은 문 뒤로 사라진다. */
-function door(b: Px) {
-  const y0 = standY(0) - 2
-  fill(b, 0, y0, 3, aisleFoot(0) - y0 + 1, 0x2b211a)
-  fill(b, 2, y0, 1, aisleFoot(0) - y0 + 1, C.wood)
+function door(b: Px, L: Layout) {
+  const y0 = standY(L, 0) - 2
+  fill(b, 0, y0, 3, aisleFoot(L, 0) - y0 + 1, 0x2b211a)
+  fill(b, 2, y0, 1, aisleFoot(L, 0) - y0 + 1, C.wood)
   fill(b, 0, y0, 3, 1, C.wood)
   dot(b, 1, y0 + 7, 0xfcc419) // 손잡이
 }
@@ -584,9 +611,9 @@ export function paperSpots(o: Office, L: Layout): PaperSpot[] {
     const at = s ?? lead
     const i = n.get(at.key) ?? 0
     n.set(at.key, i + 1)
-    if (!s) return { p, x: Math.max(LEFT, lead.col - 6 - i * 5), y: aisleFoot(0) - 3, k: 0 }
-    const k = rowOf(s) - 1
-    return { p, x: s.col + 7 - i * 5, y: aisleFoot(k) - 3, k }
+    if (!s) return { p, x: Math.max(LEFT, lead.col - 6 - i * 5), y: aisleFoot(L, 0) - 3, k: 0 }
+    const k = rowOf(L, s) - 1
+    return { p, x: s.col + 7 - i * 5, y: aisleFoot(L, k) - 3, k }
   })
 }
 
@@ -603,7 +630,7 @@ function bossOf(o: Office, L: Layout, now: number): Motion | undefined {
   const age = o.promptAt === undefined ? -1 : now - o.promptAt
   if (age < 0 || age >= BOSS_MS) return undefined
   const lead = L.seats[0]!
-  const pts = [{ x: DOOR_X, y: standY(0) }, { x: lead.col - 3, y: standY(0) }]
+  const pts = [{ x: DOOR_X, y: standY(L, 0) }, { x: lead.col - 3, y: standY(L, 0) }]
   const t = age / BOSS_MS
   if (t < 0.4) return { pts, p: ease(t / 0.4), carry: 'paper' }
   if (t < 0.6) return { pts, p: 1, give: ease((t - 0.4) / 0.2) }
@@ -636,19 +663,19 @@ function pointAt(pts: Pt[], d: number): Pt {
 const ease = (u: number) => (u < 0.5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u))
 
 /** 자리에서 큰 복도(문 · 팀장 · 책장 줄)의 x 까지 걷는 길. 꺾어서 가고 책상을 뚫고 지나가지 않는다. */
-function toHall(s: Seat, x: number): Pt[] {
+function toHall(L: Layout, s: Seat, x: number): Pt[] {
   const start = { x: s.col + 1, y: seatedY(s) }
-  const k = rowOf(s)
+  const k = rowOf(L, s)
   if (k === 0) {
     // 팀장: 책상 옆으로 비켜 나와 → 앞 복도로
     const side = { x: s.col + CW - 1, y: start.y }
-    return [start, side, { x: side.x, y: standY(0) }, { x, y: standY(0) }]
+    return [start, side, { x: side.x, y: standY(L, 0) }, { x, y: standY(L, 0) }]
   }
   // 직원: 의자 뒤 통로로 물러나 → (뒷줄이면 왼쪽 끝 길로 올라가) → 큰 복도
-  const up = { x: start.x, y: standY(k - 1) }
+  const up = { x: start.x, y: standY(L, k - 1) }
   const pts = [start, up]
-  if (k > 1) pts.push({ x: LEFT - 3, y: up.y }, { x: LEFT - 3, y: standY(0) })
-  pts.push({ x, y: standY(0) })
+  if (k > 1) pts.push({ x: LEFT - 3, y: up.y }, { x: LEFT - 3, y: standY(L, 0) })
+  pts.push({ x, y: standY(L, 0) })
   return pts
 }
 
@@ -664,7 +691,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
   const h = s.key === 'main' ? undefined : [...o.handoffs].reverse().find(x => x.from === w.id)
   const hAge = h ? now - h.at : -1
   if (h && hAge >= 0 && hAge < TRIP_MS) {
-    const pts = toHall(s, lead.col + 6) // 팀장 책상 바로 앞(조금 오른쪽)에 선다
+    const pts = toHall(L, s, lead.col + 6) // 팀장 책상 바로 앞(조금 오른쪽)에 선다
     const t = hAge / TRIP_MS
     if (t < 0.4) return { m: { pts, p: ease(t / 0.4), carry: 'paper' }, gone: false }
     if (t < 0.6) return { m: { pts, p: 1, give: ease((t - 0.4) / 0.2) }, gone: false }
@@ -675,7 +702,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
     const leaveAt = w.ended + (h && h.at >= w.ended - 1000 ? TRIP_MS : 0) + 1500
     const lAge = now - leaveAt
     if (lAge >= LEAVE_MS) return { gone: true }
-    if (lAge >= 0) return { m: { pts: toHall(s, DOOR_X), p: ease(lAge / LEAVE_MS) }, gone: false }
+    if (lAge >= 0) return { m: { pts: toHall(L, s, DOOR_X), p: ease(lAge / LEAVE_MS) }, gone: false }
   }
   if (who) return { gone: false } // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
   // 놓친 일 서류: 팀장이 그 자리 근처로 걸어가 줍고 → 자리로 돌아온다 (그 뒤 자리에서 읽음)
@@ -683,7 +710,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
     const got = paperSpots(o, L).find(x => x.p.picked !== undefined && now - x.p.picked >= 0 && now - x.p.picked < PICK_WALK_MS)
     if (got) {
       const tx = got.x - 3
-      const pts = got.k === 0 ? toHall(s, tx) : [...toHall(s, LEFT - 3), { x: LEFT - 3, y: standY(got.k) }, { x: tx, y: standY(got.k) }]
+      const pts = got.k === 0 ? toHall(L, s, tx) : [...toHall(L, s, LEFT - 3), { x: LEFT - 3, y: standY(L, got.k) }, { x: tx, y: standY(L, got.k) }]
       const t = (now - got.p.picked!) / PICK_WALK_MS
       if (t < 0.45) return { m: { pts, p: ease(t / 0.45) }, gone: false }
       if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.5 ? 'paper' : undefined }, gone: false }
@@ -694,7 +721,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
   const sh = [...(o.shelf ?? [])].reverse().find(x => x.who === id)
   const sAge = sh ? now - sh.at : -1
   if (sh && sAge >= 0 && sAge < SHELF_MS) {
-    const pts = toHall(s, L.shelfX + 2)
+    const pts = toHall(L, s, L.shelfX + 2)
     const t = sAge / SHELF_MS
     if (t < 0.4) return { m: { pts, p: ease(t / 0.4) }, gone: false }
     if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.48 ? 'book' : undefined, book: sh.book }, gone: false }
@@ -703,7 +730,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
   // 4) 출근: 문으로 들어와 자리에 앉는다
   if (s.key !== 'main') {
     const aAge = now - w.started
-    if (aAge >= 0 && aAge < ARRIVE_MS) return { m: { pts: toHall(s, DOOR_X), p: 1 - ease(aAge / ARRIVE_MS) }, gone: false }
+    if (aAge >= 0 && aAge < ARRIVE_MS) return { m: { pts: toHall(L, s, DOOR_X), p: 1 - ease(aAge / ARRIVE_MS) }, gone: false }
   }
   return { gone: false }
 }
@@ -715,7 +742,7 @@ export function leavingOf(o: Office, L: Layout, s: Seat, now: number): { w: Work
     if (w.ended === undefined) continue
     const r = motionOf(o, L, s, now, w)
     if (r.gone) continue
-    out.push({ w, m: r.m ?? { pts: toHall(s, DOOR_X), p: 0 } })
+    out.push({ w, m: r.m ?? { pts: toHall(L, s, DOOR_X), p: 0 } })
   }
   return out
 }
@@ -741,7 +768,7 @@ const tiredColor = (p: number) => (p < 40 ? 0x3fa66b : p < 70 ? 0xe0b23a : p < 9
 export function draw(o: Office, L: Layout, now: number, hour: number, fills: Record<string, number> = {}): Uint32Array {
   const b: Px = { w: L.cols, h: L.rows * 2, px: new Uint32Array(L.cols * L.rows * 2) }
   const frame = Math.floor(now / 350)
-  room(b, hour, now)
+  room(b, L, hour, now)
   const lead = L.seats[0]
   if (!lead) return b.px
 
@@ -777,7 +804,8 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
   }
   for (const s of L.seats) chair(b, s)
   type Thing = { foot: number; paint: () => void }
-  const things: Thing[] = [{ foot: 20, paint: () => shelf(b, L.shelfX, taken) }]
+  const st = shelfTop(L)
+  const things: Thing[] = [{ foot: st + SHELF_H, paint: () => shelf(b, L.shelfX, st, taken) }]
   // 걷는 사람 하나 그리기 (직원 · 팀장 · 사장님 같이 씀). key 로 옷 색, role 로 소품
   const walker = (m: Motion, role: string, key: string) => {
     const len = lengthOf(m.pts)
@@ -817,7 +845,7 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
     if (m) walker(m, s.role, s.pick ?? s.key)
     for (const x of leavingOf(o, L, s, now)) walker(x.m, s.role, s.pick ?? s.key)
   }
-  things.push({ foot: aisleFoot(0) + 1, paint: () => door(b) }) // 문은 복도 사람보다 앞
+  things.push({ foot: aisleFoot(L, 0) + 1, paint: () => door(b, L) }) // 문은 복도 사람보다 앞
   things.sort((a, c) => a.foot - c.foot)
   for (const t of things) t.paint()
 

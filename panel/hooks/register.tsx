@@ -81,7 +81,7 @@ function sceneOf(o: Office, width: number, rows: number, now: number, keep = fal
   const units = unitsOf(o, now)
   const p = keep && lastPlan ? lastPlan : plan(units, width, rows)
   if (!keep) lastPlan = p
-  return layout(o, width, unitOf, familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles })
+  return layout(o, width, unitOf, familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles, compact: p.compact })
 }
 
 /** 그림 한 장 (2배면 늘려서) */
