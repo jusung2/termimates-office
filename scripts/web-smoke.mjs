@@ -66,7 +66,7 @@ if (!api.select('__help').includes('사용법')) { console.error('도움말 없�
 if (!api.select('__shelf').includes('qa-checklist')) { console.error('책장 카드에 스킬이 없음'); process.exit(1) }
 for (const k of ['main', ...units.map((u) => u.key)]) { const html = api.select(k); if (!html.includes('지금 화면')) { console.error('카드에 지금 화면 없음', k); process.exit(1) } }
 const shut = api.news(false), open = api.news(true)
-if ((shut.match(/<time>/g) || []).length > 3 || (open.match(/<time>/g) || []).length < 4) { console.error('게시판 줄 수가 이상함', shut.length, open.length); process.exit(1) }
+if ((shut.match(/<time>/g) || []).length > 3 || !open.includes('사무실 소식') || (open.match(/class="srow/g) || []).length < 4) { console.error('게시판 · 소식 카드 줄 수가 이상함', shut.length, open.length); process.exit(1) }
 api.news(false)
 const L = api.layout(1000)
 console.log('seats', L.seats.map((s) => s.key).join(','), '| H', L.H, '| draws', calls.draw, '| texts', calls.text)
