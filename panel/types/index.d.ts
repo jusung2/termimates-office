@@ -74,6 +74,7 @@ export type View = {
   shelfMore?: boolean // 플러그인 스킬까지 펼쳤나
   guide?: boolean // 처음 쓰는 사람 안내 카드
   tired?: boolean // 피로도를 눌러 정리 안내를 펼쳤나
+  cardOpen?: number // 붐벼서 한 줄로 접힌 아래 카드를 사장님이 펼쳐 뒀나 (펼친 때의 「안 붐빈 횟수」 + 1 — 그 뒤로 한 번이라도 안 붐볐으면 무효)
 }
 
 /** 토큰 네 갈래 (API 이름: input · cache_read · cache_creation · output) */

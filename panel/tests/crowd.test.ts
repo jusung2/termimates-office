@@ -232,9 +232,14 @@ test('촘촘한 윗부분 (패널): 그림 몫이 보통 섬 높이보다 낮아
   }
   const mount = (rows: number) => $.ui.mount({ plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
     props: { title: '사무실', isFocused: false, bodyColumns: 113, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} } })
-  // 패널 81줄: 위 글줄 + 짧은 카드(붐빌 때)를 빼면 그림 몫 62줄 → 보통 윗부분 섬(66줄)은 안 들어가고 촘촘한 윗부분으로 61줄
-  expect(await (async () => { const u = await mount(80); const [x] = await u.findAll({ type: 'Raster' }); await u.unmount(); return x!.props.rows })()).toBe(35) // 한 줄 모자라면 1배
+  // 패널 81줄: 위 글줄 + 짧은 카드(붐빌 때)를 빼면 그림 몫 62줄 → 보통 윗부분 섬(66줄)은 안 들어가고 촘촘한 윗부분으로 61줄 (카드는 안 접힘)
+  // 80줄은 짧은 카드로는 한 줄 모자라 1배 → 카드를 한 줄로 접어서 1.5배 (보통 윗부분 66줄까지 들어감 · 접는 건 아래 「붐빌 때 카드 접기」 시험)
+  const at80 = await mount(80)
+  expect((await at80.findAll({ type: 'Raster' }))[0]!.props.rows).toBe(66)
+  expect((await at80.findAll({ type: 'Button' })).some(b => b.key === 'card-fold')).toBe(true)
+  await at80.unmount()
   const ui = await mount(81)
+  expect((await ui.findAll({ type: 'Button' })).some(b => b.key === 'card-fold' || b.key === 'card-unfold')).toBe(false)
   const [r] = await ui.findAll({ type: 'Raster' })
   expect(r!.props.rows).toBe(61)
   expect(r!.props.columns).toBe(112)
@@ -274,12 +279,105 @@ test('패널 카드 줄이기: 피로도 · 전기세 몫 한 줄, 「지금:」
   expect(t.filter(x => x.startsWith('  ') && x.includes(' — 일 ')).length).toBe(4)
   expect(t.some(x => /외 \d+건/.test(x))).toBe(false)
   await ui.unmount()
-  // 붐빌 때(10명): 맡긴 일은 3줄 + 「외 7건」
+  // 붐빌 때(10명): 맡긴 일은 3줄 + 「외 7건」 (80줄은 접히니 펼쳐서 본다)
   await spawn(['designer', 'designer', 'executor', 'executor', 'executor', 'Explore'], 4)
   ui = await mount(113, 80)
+  await ui.press({ key: 'card-fold' })
   t = await texts(ui)
   expect(t.some(x => x === '맡긴 일 10건:')).toBe(true)
   expect(t.filter(x => x.startsWith('  ') && x.includes(' — 일 ')).length).toBe(3)
   expect(t.some(x => x.includes('외 7건'))).toBe(true)
+  await ui.unmount()
+})
+
+test('붐빌 때 카드 접기: 접어야 섬이 커질 때만 「▸ 팀장 …」 한 줄 + 말 걸기 칸, 누르면 펼침 · 다시 누르면 접힘, 직원 카드는 펼친 채, 붐빔이 끝나면 원래대로', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 24, 5, 0, 0) })
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('agent.spawn', (_, e) => ({ model: 'claude-sonnet-5-5', agentId: 'a-' + e.tool_use_id }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '회원가입', wait: false, origin: { kind: 'composer' } })
+  const MIX = ['designer', 'designer', 'designer', 'executor', 'executor', 'executor', 'executor', 'verifier', 'git-master', 'general-purpose', 'Explore', 'planner']
+  let n = 0
+  const spawnTo = async (m: number) => {
+    for (; n < m; n++) {
+      await $.agent.spawn({ tool_use_id: 't' + n, prompt: '일', description: MIX[n] === 'designer' ? '시안' : MIX[n] === 'executor' ? '구현' : `일 ${n}`, subagentType: MIX[n]!,
+        provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false })
+    }
+  }
+  const mount = (rows: number) => $.ui.mount({ plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
+    props: { title: '사무실', isFocused: false, bodyColumns: 113, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} } })
+  type UI = Awaited<ReturnType<typeof mount>>
+  const rowsOf = async (ui: UI) => (await ui.findAll({ type: 'Raster' }))[0]!.props.rows
+  const btn = async (ui: UI, key: string) => (await ui.findAll({ type: 'Button' })).find(b => b.key === key)
+  const texts = async (ui: UI) => (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  // 적을 때(2명 · 6명)는 어떤 높이에서도 안 접힘
+  for (const m of [2, 6]) {
+    await spawnTo(m)
+    for (const r of [40, 60, 70, 81]) {
+      const ui = await mount(r)
+      expect(await btn(ui, 'card-fold')).toBeUndefined()
+      expect(await btn(ui, 'card-unfold')).toBeUndefined()
+      await ui.unmount()
+    }
+  }
+  for (const m of [10, 12]) {
+    await spawnTo(m)
+    // 113 × 70: 접으면 1.5배 섬 (펼친 짧은 카드로는 1배)
+    let ui = await mount(70)
+    expect(await rowsOf(ui)).toBe(61)
+    const f = await btn(ui, 'card-fold')
+    expect(f!.text).toBe(`▸ 팀장 · 피로도 아직 안 잼 · 맡긴 일 ${m}건 (일하는 중 ${m}) · 누르면 펼침`)
+    expect((await texts(ui)).some(x => x.startsWith('맡긴 일'))).toBe(false) // 카드 몸통은 접힘
+    expect(dw(f!.text!)).toBeLessThanOrEqual(113)
+    // 누르면 펼침 → 1배 · 머리줄 「▾ 팀장 …」, 다시 그려도(다시 열어도) 펼친 채
+    await ui.press({ key: 'card-fold' })
+    expect(await rowsOf(ui)).toBe(35)
+    expect((await btn(ui, 'card-unfold'))!.text).toMatch(/^▾ 팀장 · 메인 Claude/)
+    expect((await texts(ui)).some(x => x === `맡긴 일 ${m}건:`)).toBe(true)
+    await ui.unmount()
+    ui = await mount(70)
+    expect(await rowsOf(ui)).toBe(35)
+    expect(await btn(ui, 'card-fold')).toBeUndefined()
+    // 다시 누르면 접힘
+    await ui.press({ key: 'card-unfold' })
+    expect(await rowsOf(ui)).toBe(61)
+    expect(await btn(ui, 'card-fold')).toBeDefined()
+    // 직원을 누르면 그 카드는 펼친 채 (1배), 머리줄 「▾」 을 누르면 팀장 카드로 돌아가 접힘
+    await ui.press({ key: (await ui.findAll({ type: 'Button' })).find(b => b.key?.startsWith('isle-btn-') && b.text === '디자이너 ×3')!.key! })
+    expect(await btn(ui, 'card-fold')).toBeUndefined()
+    expect((await btn(ui, 'card-unfold'))!.text).toMatch(/^▾ 디자이너/)
+    expect(await rowsOf(ui)).toBe(35)
+    await ui.press({ key: 'card-unfold' })
+    expect(await btn(ui, 'card-fold')).toBeDefined()
+    expect(await rowsOf(ui)).toBe(61)
+    await ui.unmount()
+    // 69줄은 접어도 1배라 안 접힘 (지금 카드 그대로) · 81줄은 펼친 채로도 1.5배라 안 접힘
+    for (const r of [69, 81]) {
+      ui = await mount(r)
+      expect(await btn(ui, 'card-fold')).toBeUndefined()
+      expect(await btn(ui, 'card-unfold')).toBeUndefined()
+      await ui.unmount()
+    }
+  }
+  // 펼쳐 둔 채 붐빔이 끝나면(직원이 다 퇴근) 지움 → 다음에 붐비면 다시 접혀서 시작
+  let ui = await mount(70)
+  await ui.press({ key: 'card-fold' })
+  await ui.unmount()
+  for (let i = 0; i < n; i++) await $.turn.complete({ turnId: 'x' + i, agentId: 'a-t' + i, answer: '끝', durationMs: 10, isAborted: false, reason: 'answer' })
+  await clock.advance(LINGER_MS + 60_000)
+  ui = await mount(70)
+  expect(await btn(ui, 'card-unfold')).toBeUndefined()
+  await ui.unmount()
+  n = 0
+  for (const t of Array.from({ length: 12 }, (_, i) => i)) await $.agent.spawn({ tool_use_id: 'u' + t, prompt: '일', description: MIX[t] === 'designer' ? '시안' : MIX[t] === 'executor' ? '구현' : `일 ${t}`,
+    subagentType: MIX[t]!, provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false })
+  ui = await mount(70)
+  expect(await btn(ui, 'card-fold')).toBeDefined()
+  expect(await rowsOf(ui)).toBe(61)
   await ui.unmount()
 })
