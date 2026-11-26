@@ -23,6 +23,13 @@ export type Worker = {
   family?: string // 생김새용 기본 역할 (기획자 · 디자이너 · 개발자 · QA · 리서처)
   team?: string // 팀 번호 (「QA 1팀」 의 1). 있으면 사무실엔 팀 하나 = 한 자리
   member?: string // 팀 안 번호 (「1-2」)
+  model?: string // 일하는 모델 (agent.spawn 결과의 model, 또는 roles.json)
+  tier?: 'intern' | 'junior' | 'senior' | 'partner' // 직급 배지: 인턴 · 주니어 · 시니어 · 협력사(바깥 AI). 모르면 없음
+  persona?: string // 맡긴 일에서 입힌 성격 · 역할 (「까칠한 시니어 리뷰어」). 애매하면 없음
+  parent?: string // 이 직원에게 일을 맡긴 직원 id (팀장이 맡겼으면 없음)
+  part?: string // 층: 이 직원을 부른 파트장 자리 이름 (「개발자」). 손주 직원도 맨 위 파트장. 팀장이 불렀으면 없음
+  checker?: boolean // 검사 직원 (남이 한 일을 보고 통과 · 반려를 정함) → 웹 사무실 심사대에 앉는다
+  reviewOf?: string // 검사 직원이 보는 서류를 만든 직원 id (출근 직전 같은 부모 아래 막 끝난 직원으로 짐작). 모르면 없음
 }
 
 export type Office = {

@@ -61,6 +61,75 @@ export function jobOf(type: string, text = ''): string {
   return familyOf(type, text)
 }
 
+
+// -- 직급 · 페르소나 -------------------------------------------------------------------------
+// 직급: 그 직원이 어떤 모델로 일하는지. haiku = 인턴, sonnet = 주니어, opus = 시니어, 바깥 AI(codex · gemini 등) = 협력사.
+// 모르면 없음 (배지를 안 그린다).
+export type Tier = 'intern' | 'junior' | 'senior' | 'partner'
+export const TIERS: Record<Tier, { stars: string; name: string }> = {
+  intern: { stars: '★', name: '인턴' },
+  junior: { stars: '★★', name: '주니어' },
+  senior: { stars: '★★★', name: '시니어' },
+  partner: { stars: '🤝', name: '협력사' },
+}
+export const tierText = (t: Tier): string => `${TIERS[t].stars} ${TIERS[t].name}`
+
+const PARTNER = /^(codex|gemini|ccg|gpt|openai|grok)$/
+const words = (s: string | undefined): string[] => (s ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+
+/** 바깥 AI 에게 맡긴 직원인가: 에이전트 종류 이름 · 이름에 codex · gemini 같은 낱말이 있으면.
+ *  맡긴 일 설명은 안 본다 (Claude 직원이 「gemini 문서 조사」 를 맡아도 협력사가 아님).
+ *  (Worker.teammate 는 Claude Code 에이전트 팀원이라는 뜻이라 여기서 안 씀) */
+export function isPartner(...texts: (string | undefined)[]): boolean {
+  return texts.some(t => words(t).some(w => PARTNER.test(w)))
+}
+
+/** 모델 이름(「claude-haiku-5-5」 · 「haiku」 · 「opus」) → 직급. 모르는 모델이면 없음 */
+export function tierOfModel(model: string | undefined): Tier | undefined {
+  const ws = words(model)
+  if (ws.some(w => PARTNER.test(w))) return 'partner'
+  if (ws.includes('opus')) return 'senior'
+  if (ws.includes('sonnet')) return 'junior'
+  if (ws.includes('haiku')) return 'intern'
+  return undefined
+}
+
+// 페르소나: 맡긴 일에 「너는 까칠한 시니어 리뷰어야」 처럼 성격 · 역할을 입혔을 때 그 이름.
+// 보수적으로 뽑는다: 「너는/당신은 … (이)야/다/입니다」 또는 「You are a … reviewer」 꼴이고, 두 낱말 이상이며,
+// 끝 낱말이 사람 역할 이름일 때만. 숫자(팀 번호)나 문장 부호가 섞이면 안 뽑는다 — 애매하면 안 보여 준다.
+const KO_ROLE = /(리뷰어|검토자|개발자|디자이너|기획자|전문가|엔지니어|담당자|테스터|아키텍트|설계자|매니저|비평가|평론가|멘토|분석가|작가|편집자|리서처|연구원|검사관|감독관|감사관|심사위원|코치|선배|리더|컨설턴트|해커|교수|선생님|PM|QA)$/i
+const EN_ROLE = /^(reviewer|engineer|developer|designer|architect|critic|tester|expert|analyst|writer|editor|researcher|planner|manager|mentor|auditor|consultant|hacker|lead|coach|judge|skeptic)$/i
+const KO_PERSONA = /(?:^|[\s"'「(])(?:너는|당신은)\s+(.{2,24}?)\s*(?:이다|입니다|이야|야|다|예요|이에요)(?=$|[\s.,!?~"'」)])/
+const EN_PERSONA = /\byou are (?:an?|the)\s+([a-z][a-z\- ]{2,40}?)(?=$|[.,;:!\n]|\s+(?:who|that|and|with|for|in|on)\b)/i
+
+export function personaOf(text: string | undefined): string | undefined {
+  const t = text ?? ''
+  const ok = (c: string, role: RegExp) => {
+    const ws = c.trim().split(/\s+/)
+    return ws.length >= 2 && ws.length <= 5 && !/[\d.,!?:;「」"'()[\]{}/]/.test(c) && role.test(ws[ws.length - 1] ?? '')
+  }
+  const ko = KO_PERSONA.exec(t)?.[1]?.trim()
+  if (ko && ok(ko, KO_ROLE)) return clip(ko, 16)
+  const en = EN_PERSONA.exec(t)?.[1]?.trim()
+  if (en && ok(en, EN_ROLE)) return clip(en, 24)
+  return undefined
+}
+
+// 사용자가 직접 정한 직급 · 페르소나 (~/.termimates/roles.json 의 { "종류": { "persona": …, "model": … } })
+export type RoleSet = { persona?: string; model?: string }
+let ROLES: Record<string, RoleSet> = {}
+export function setRoles(map: Record<string, unknown>): void {
+  ROLES = {}
+  for (const [k, v] of Object.entries(map ?? {})) {
+    if (!v || typeof v !== 'object') continue
+    const r = v as Record<string, unknown>
+    const persona = typeof r.persona === 'string' && r.persona.trim() ? clip(r.persona, 24) : undefined
+    const model = typeof r.model === 'string' && r.model.trim() ? r.model.trim() : undefined
+    if (persona || model) ROLES[k] = { persona, model }
+  }
+}
+export const roleOf = (type: string): RoleSet | undefined => ROLES[type] ?? ROLES[type.split(':').pop() ?? type]
+
 /** 팀 번호: 「1팀」 「team 2」 「팀3」, 없으면 팀원 번호 「1-2」 의 앞 숫자 (날짜 같은 큰 숫자는 빼고) */
 export function teamOf(text: string): string | undefined {
   const m = /(\d{1,2})\s*팀|팀\s*(\d{1,2})|\bteam[\s_-]*(\d{1,2})\b/i.exec(text) ?? undefined

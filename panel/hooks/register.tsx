@@ -18,7 +18,7 @@ import {
 import { CW, draw, encode, isGone, isMoving, layout, seatsOf, TAG_ROW } from './scene'
 import { reportOf, stepsFromLog } from './replay'
 import { setLocalNotes, skillNote, skillRole } from './skills'
-import { ago, bubbles, clip, hhmm, isGeneric, namesNow, setNames, targetOf, title } from './words'
+import { ago, bubbles, clip, hhmm, isGeneric, namesNow, setNames, setRoles, targetOf, tierText, TIERS, title } from './words'
 
 const PANE = 'office'
 const TITLE = '사무실'
@@ -427,10 +427,17 @@ async function fillPrompt($: EngineInterface, text: string) {
 
 // -- 이름표: 사용자가 정한 이름 (패널에서 바꾼 것 + ~/.termimates/roles.json) --------------------------
 async function loadNames($: EngineInterface) {
+  // 값이 글자면 이름표 이름, { name, persona, model } 이면 이름 · 페르소나 · 직급(모델)까지
   let file: Record<string, string> = {}
   try {
     const raw = JSON.parse(String(await $.fs.read(`${await homeOf($)}/.termimates/roles.json`))) as unknown
-    if (raw && typeof raw === 'object') file = raw as Record<string, string>
+    if (raw && typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const name = typeof v === 'string' ? v : v && typeof v === 'object' ? (v as { name?: unknown }).name : undefined
+        if (typeof name === 'string') file[k] = name
+      }
+      setRoles(raw as Record<string, unknown>)
+    }
   } catch {
     // 없으면 그만
   }
@@ -702,6 +709,7 @@ export const register: Register = on => {
     const spawn = {
       id, type: e.subagentType, name: e.name, description: e.description, background: e.background,
       teammate: e.isTeammate === true, parentAgentId: e.parentAgentId, prompt: (e.prompt ?? '').slice(0, 300),
+      model: ran.model ?? e.model, // 엔진이 정한 진짜 모델 id (없으면 Agent 호출에 적힌 별명)
     }
     await change($, (o, now) => onSpawn(o, spawn, now))
     void rec($, 'spawn', [spawn])

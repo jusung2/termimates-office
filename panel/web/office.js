@@ -53,6 +53,13 @@
   const lookOf = (job) => LOOK[job] || 'guest';
 
   // ---- 말풍선 글 (패널 words.ts 와 같은 뜻) ----
+  // 직급 배지: 모델 직급 (haiku 인턴 · sonnet 주니어 · opus 시니어 · 바깥 AI 협력사). 글자 말고 색으로도 구분
+  const TIER = {
+    intern: { stars: '★', name: '인턴', bg: '#1c3d73', fg: '#a5d8ff' },
+    junior: { stars: '★★', name: '주니어', bg: '#1b4d2e', fg: '#b2f2bb' },
+    senior: { stars: '★★★', name: '시니어', bg: '#5c4305', fg: '#ffe066' },
+    partner: { stars: '🤝', name: '협력사', bg: '#3d2466', fg: '#e5dbff' },
+  };
   const BUBBLE = { think: '생각 중…', handoff: '서류 전달!', ask: '지시 기다려요', wait_report: '보고 기다리는 중', done: '보고 완료 ✓', idle: '쉬는 중', unfinished: '못 끝냈어요…' };
   const VERB = { Read: '읽는 중', Edit: '고치는 중', MultiEdit: '고치는 중', NotebookEdit: '고치는 중', Write: '쓰는 중', Bash: '실행 중',
     Grep: '찾는 중', Glob: '찾는 중', WebSearch: '검색 중', WebFetch: '읽는 중', Skill: '스킬 읽는 중', Agent: '일 맡기는 중', Task: '일 맡기는 중',
@@ -676,24 +683,57 @@
     }
 
     // 말풍선: 줄마다 옆자리와 겹치지 않게 (옆이 비면 넓게, 좁으면 짧은 말)
+    // 페르소나(맡긴 일에서 입힌 성격)는 상태 말풍선 왼쪽에 작은 빨간 말풍선으로 나란히 — 위로 쌓으면 윗줄 이름표와 겹친다
     const rows = new Map();
     for (const s of L.seats) rows.set(s.sy, (rows.get(s.sy) || []).concat([s]));
+    const qfs = Math.round(fs * 0.74);
     for (const row of rows.values()) {
       row.sort((a, b) => a.cx - b.cx);
-      const say = (s) => (s.worker && !gone.has(s.key) && !moves.has(s.key) ? bubbleOf(s.worker) : null);
+      const off = (s) => gone.has(s.key) || moves.has(s.key);
+      const say = (s) => (s.worker && !off(s) ? bubbleOf(s.worker) : null);
+      const persona = (s) => (!s.lead && s.worker && s.worker.persona && !off(s) ? s.worker.persona : null);
+      const busy = (s) => !!(say(s) || persona(s));
       row.forEach((s, i) => {
-        const b = say(s);
-        if (!b || !b.long) return;
+        const b0 = say(s), b = b0 && b0.long ? b0 : null, pz = persona(s);
+        if (!b && !pz) return;
         const prev = row[i - 1], next = row[i + 1];
-        const lo = prev ? (say(prev) ? prev.cx + SLOT_W / 2 : prev.cx) : 0;
-        const hi = next ? (say(next) ? next.cx - SLOT_W / 2 : next.cx) : L.W;
+        const lo = prev ? (busy(prev) ? prev.cx + SLOT_W / 2 : prev.cx) : 0;
+        const hi = next ? (busy(next) ? next.cx - SLOT_W / 2 : next.cx) : L.W;
+        let room = X(hi - lo) - fs;
+        // 페르소나 몫 먼저 (상태 말풍선이 있으면 자리의 절반까지만)
+        const gap = 3 * dpr, pph = qfs * 1.6;
+        let ptext = null, ppw = 0;
+        if (pz) {
+          ctx.font = `700 ${qfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          const cap = b ? room * 0.5 : room;
+          let inner = pz, cut = false;
+          const pt = () => `"${inner}${cut ? '…' : ''}"`;
+          while (inner.length > 2 && ctx.measureText(pt()).width + qfs > cap) { inner = inner.slice(0, -1); cut = true; }
+          ptext = pt(); ppw = ctx.measureText(ptext).width + qfs;
+          room -= ppw + gap;
+        }
+        let text = null, pw = 0;
+        const ph = fs * 1.7;
+        if (b) {
+          ctx.font = `600 ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          text = ctx.measureText(b.long).width <= room ? b.long : b.short;
+          while (text.length > 2 && ctx.measureText(text).width > room) text = text.slice(0, -2) + '…';
+          pw = ctx.measureText(text).width + fs * 1.1;
+        }
+        const total = pw + (ptext ? ppw + (b ? gap : 0) : 0);
+        const left = clamp(X(s.cx) - total / 2, X(lo), X(hi) - total);
+        if (ptext) {
+          const px = left, py = Y(s.sy + 12) - pph / 2, red = '#c92a2a';
+          ctx.fillStyle = 'rgba(0,0,0,0.18)'; roundRect(ctx, px + dpr, py + 2 * dpr, ppw, pph, pph / 2.4); ctx.fill();
+          ctx.fillStyle = red; roundRect(ctx, px, py, ppw, pph, pph / 2.4); ctx.fill();
+          const tx = clamp(X(s.cx), px + pph / 2, px + ppw - pph / 2);
+          ctx.beginPath(); ctx.moveTo(tx - 3 * dpr, py + pph - dpr); ctx.lineTo(tx, py + pph + 5 * dpr); ctx.lineTo(tx + 3 * dpr, py + pph - dpr); ctx.fill();
+          ctx.font = `700 ${qfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+          ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(ptext, px + ppw / 2, py + pph / 2 + dpr * 0.5);
+        }
+        if (!b) return;
         ctx.font = `600 ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
-        const room = X(hi - lo) - fs;
-        let text = ctx.measureText(b.long).width <= room ? b.long : b.short;
-        while (text.length > 2 && ctx.measureText(text).width > room) text = text.slice(0, -2) + '…';
-        const tw = ctx.measureText(text).width, pw = tw + fs * 1.1, ph = fs * 1.7;
-        let bx = X(s.cx) - pw / 2;
-        bx = clamp(bx, X(lo), X(hi) - pw);
+        const bx = left + (ptext ? ppw + gap : 0);
         const by = Y(s.sy + 12) - ph / 2;
         const st = s.worker.status;
         const accent = st === 'done' ? '#2f9e44' : st === 'unfinished' ? '#c9423a' : st === 'ask' ? '#e07a3a' : st === 'work' ? '#1971c2' : '#8a7f74';
@@ -708,24 +748,48 @@
     }
     // 이름표 (자리 가운데) + 누를 자리
     for (const s of L.seats) {
-      const isSel = s.key === sel, away = gone.has(s.key);
+      const isSel = (s.pick || s.key) === sel, away = gone.has(s.key);
       const name = (s.count > 1 && !s.team ? `${s.name} ×${s.count}` : s.name) + (away ? ' 퇴근' : '');
-      // 이름표 밑 작은 피로도 캡슐 (직원마다 따로)
+      // 직급 배지: 이름표 오른쪽 같은 줄에 (밑에 두면 아랫줄 말풍선과 겹친다). 1배에서도 읽히는 크기, 자리 폭에 안 들어가면 별만,
+      // 그래도 안 들어가면 안 그린다 (이름표 밑은 아랫줄 말풍선 자리, 책상 위는 그림을 가림). 페르소나가 있으면 빨간 테두리
+      const tier = !s.lead && !away && s.worker ? TIER[s.worker.tier] : null;
+      const nfont = `${isSel || s.lead ? 700 : 500} ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+      ctx.font = nfont;
+      const pw0 = ctx.measureText(name).width + fs * 0.9, room = X(SLOT_W) - 6 * dpr, gap = 3 * dpr;
+      const bfs = Math.max(Math.round(10 * dpr), Math.round(fs * 0.68));
+      let badge = null;
+      if (tier) {
+        ctx.font = `700 ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        const wOf = (t) => ctx.measureText(t).width + bfs;
+        const full = `${tier.stars} ${tier.name}`;
+        const text = pw0 + gap + wOf(full) <= room ? full : tier.stars;
+        badge = pw0 + gap + wOf(text) <= room ? { text, w: wOf(text), inline: true } : null; // 별도 안 들어가면 안 그림 (카드에서 봄)
+      }
+      const shift = badge && badge.inline ? (badge.w + gap) / 2 : 0, ny = Y(s.sy + 115);
+      const pw = label(name, X(s.cx) - shift, ny, isSel
+        ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, border: '#fff3d6' }
+        : { bg: away ? 'rgba(43,36,32,.45)' : 'rgba(43,36,32,.82)', fg: away ? '#a99f95' : '#f3ead9', bold: s.lead });
+      let below = ny + fs * 0.75; // 이름표 아래 끝
+      if (badge) {
+        const bh = bfs * 1.45, bx = X(s.cx) - shift + pw / 2 + gap, by = ny - bh / 2;
+        ctx.font = `700 ${bfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+        ctx.fillStyle = tier.bg; roundRect(ctx, bx, by, badge.w, bh, bh / 2); ctx.fill();
+        if (s.worker.persona) { ctx.strokeStyle = '#ff4d4f'; ctx.lineWidth = 1.5 * dpr; ctx.stroke(); }
+        ctx.fillStyle = tier.fg; ctx.fillText(badge.text, bx + badge.w / 2, by + bh / 2 + dpr * 0.5);
+      }
+      // 그 밑 작은 피로도 캡슐 (직원마다 따로)
       const fp = !away ? pctOf(fillOf(s)) : null;
       if (fp != null && s.worker && s.worker.status !== 'desk' && s.worker.status !== 'off') {
-        const bw = 30 * dpr, bh = 4 * dpr, bx = X(s.cx) - bw / 2, by = Y(s.sy + 115) + fs * 0.95;
+        const bw = 30 * dpr, bh = 4 * dpr, bx = X(s.cx) - bw / 2, by = below + fs * 0.2;
         ctx.fillStyle = 'rgba(26,21,18,.85)'; roundRect(ctx, bx - dpr, by - dpr, bw + 2 * dpr, bh + 2 * dpr, bh); ctx.fill();
         ctx.fillStyle = stageOf(fp)[2]; roundRect(ctx, bx, by, Math.max(bh, (bw * Math.min(100, fp)) / 100), bh, bh / 2); ctx.fill();
       }
-      label(name, X(s.cx), Y(s.sy + 115), isSel
-        ? { bg: '#ffd89b', fg: '#2a1d05', bold: true, border: '#fff3d6' }
-        : { bg: away ? 'rgba(43,36,32,.45)' : 'rgba(43,36,32,.82)', fg: away ? '#a99f95' : '#f3ead9', bold: s.lead });
       if (s.team && s.members) {
         const dn = s.members.filter((m) => m.status === 'done').length;
         ctx.font = `700 ${Math.round(fs * 0.62)}px -apple-system, "Apple SD Gothic Neo", sans-serif`; ctx.fillStyle = '#ffd89b';
         ctx.fillText(`${dn}/${s.members.length} 끝`, X(s.cx), Y(s.sy + 43.5));
       }
-      hits.push({ key: s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
+      hits.push({ key: s.pick || s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
     }
     hits.push({ key: '__shelf', x: L.shelf.x, y: L.shelf.y, w: L.shelf.w, h: L.shelf.h + 20 }); // 책장 누르면 스킬 목록
     hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 옆에 소식 전체 목록 (책장처럼)
@@ -1000,6 +1064,9 @@
         rows.push(screen(w, ''));
         row('지금', w.status === 'done' ? `보고 완료 · ${ago(now - (w.ended || now))} 전` : `${esc(w.action)} · ${ago(now - w.since)}째`);
         if (w.task) row('맡은 일', `${esc(w.task)} <span style="color:#8a7f74">(팀장이 맡김)</span>`);
+        { const t = TIER[w.tier];
+          if (t) row('모델 직급', `<span style="background:${t.bg};color:${t.fg};padding:1px 8px;border-radius:9px;font-weight:700">${t.stars} ${t.name}</span>${w.model ? ` <span style="color:#8a7f74">${esc(w.model)}</span>` : ''}`); }
+        if (w.persona) row('페르소나', `<span style="color:#ff6b6b;font-weight:700">「${esc(w.persona)}」</span> <span style="color:#8a7f74">(맡긴 일에서 입힌 성격)</span>`);
         row('피로도', gauge(pw.workers && pw.workers[w.id]));
         { const wp = pctOf(pw.workers && pw.workers[w.id]);
           if (wp != null && wp >= 70) rows.push('<div class="note">대화가 많이 찼어요. 남은 일은 새 직원에게 나눠 맡기면 덜 피곤해요. 이 직원은 팀장과 따로 자기 대화를 들고 일해서, 일이 끝나면 이 대화는 버려지고 다음 직원은 0% 부터 시작해요.</div>'); }
