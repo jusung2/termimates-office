@@ -195,7 +195,7 @@ export type Layout = {
 
 export type Scale = 1 | 1.5 | 2
 
-/** 그림에 놓인 섬 한 조각 (1배 칸 기준). 이름표는 그리는 쪽이 이 자리 아래 하나로 */
+/** 그림에 놓인 섬 한 조각 (1배 칸 기준). 이름표는 그리는 쪽이 이 자리 아래 하나로. people = 이 조각 책상에 앉은 사람 수 */
 export type IsleSpot = { name: string; people: number; first: boolean; other: boolean; col: number; w: number; row: number; keys: string[] }
 
 /** 1.5배: 시작 칸을 팀장 자리의 12칸 무늬에 맞추는 만큼 (가까운 쪽, 넘치면 왼쪽으로) */
@@ -403,7 +403,9 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
       if (k === 1.5) x += alignTo(leadCol, x, total, cols)
       const y = top + r * CH
       for (const g of row) {
-        isles.push({ name: g.isle.name, people: g.isle.people, first: g.first, other: !!g.isle.other, col: x, w: g.keys.length * CW, row: y, keys: g.keys })
+        // 이름표 수 = 이 조각 책상에 앉은 사람 수 (같은 생김새 역할이라 한 섬으로 묶인 다른 이름 자리가 다음 줄로 넘어가도 안 셈)
+        const people = g.keys.reduce((n, key) => n + (opts.spots!.find(s => s.key === key)?.people ?? 0), 0)
+        isles.push({ name: g.isle.name, people, first: g.first, other: !!g.isle.other, col: x, w: g.keys.length * CW, row: y, keys: g.keys })
         g.keys.forEach((_, j) => seats.push({ ...staff[i++]!, col: x + j * CW, row: y }))
         x += g.keys.length * CW + gap
       }

@@ -1518,9 +1518,9 @@ export const register: Register = on => {
             return out
           })()}
           {(L.isles ?? []).filter(g => g.keys.length >= 2 && !g.other).map(g => {
-            // 역할별 섬: 자리마다 이름표 대신 섬 아래 하나 (「디자이너 ×3」, 한 줄보다 긴 섬의 이어진 조각은 이름만)
+            // 역할별 섬: 자리마다 이름표 대신 섬 아래 하나 (「디자이너 ×3」 — 수는 이 조각 책상에 앉은 사람 수)
             const left = xOf(L, g.col), room = xOf(L, g.col + g.w) - left - 2
-            const text = tagText({ name: g.name, count: g.first ? g.people : 1 }, room)
+            const text = tagText({ name: g.name, count: g.people }, room)
             // 누를 때마다 섬 안 자리를 차례로 고른다 (자리마다 이름표가 없으니)
             const picks = [...new Set(L.seats.filter(x => g.keys.includes(x.key)).map(x => x.pick ?? x.key))]
             const pk = picks[(picks.indexOf(sel) + 1) % picks.length] ?? 'main'
