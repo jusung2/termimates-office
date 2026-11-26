@@ -1,6 +1,7 @@
 // 미리보기: 실제 scene.ts 의 plan() → layout() → draw() → zoom() 길 그대로 그린 픽셀을 PNG 로 (칸 하나 = 가로 1 · 세로 2 픽셀, 4배 확대)
-// 쓰는 법: node scripts/panel-preview.mjs <출력.png> [칸=113] [그림 줄 수=40] [서류]   (최종 확인은 진짜 터미널로)
+// 쓰는 법: node scripts/panel-preview.mjs <출력.png> [칸=113] [그림 줄 수=40] [서류 | 직원N]   (최종 확인은 진짜 터미널로)
 // 「서류」 를 붙이면 놓친 일 서류 장면: 바닥에 서류 둘 + 팀장이 하나를 주우러 가는 중 (두 번째 그림)
+// 「직원N」(N = 1~12) 은 기본 예시 대신 직원 N명이 일하는 장면 (디자이너 셋 · 개발자 넷 병렬 · 검증 · git · 개발자 3팀 · 리서처 · 기획자 순으로 N명)
 import { writeFileSync } from 'node:fs'
 import { register } from 'node:module'
 import { deflateSync } from 'node:zlib'
@@ -15,11 +16,18 @@ const now = 1_800_000_000_000
 let o = office.onPrompt(office.EMPTY, '회원가입 만들어줘', now - 90000)
 const sp = (id, type, description, x = {}) => { o = office.onSpawn(o, { id, type, description, background: true, ...x }, now - 80000 + o.workers.length * 100) }
 const work = (id, tool = 'Edit') => { o = office.onToolStart(o, id, tool, 'a.ts', undefined, now - 3000) }
+const crowd = /^직원(\d+)$/.exec(extra)
+if (crowd) {
+  const MIX = [['designer', '시안'], ['designer', '시안'], ['designer', '시안'], ['executor', '구현'], ['executor', '구현'], ['executor', '구현'], ['executor', '구현'],
+    ['verifier', '최종 확인'], ['git-master', '커밋 나누기'], ['general-purpose', '개발 3팀 시연 다듬기'], ['Explore', '조사'], ['planner', '계획']]
+  MIX.slice(0, +crowd[1]).forEach(([t, d], i) => { sp(`c${i}`, t, d); work(`c${i}`, i % 3 ? 'Edit' : 'Bash') })
+} else {
 for (const t of [1, 2, 3]) { sp(`q${t}1`, 'general-purpose', `QA ${t}팀 ${t}-1`); o = office.onComplete(o, `q${t}1`, '찾음', false, now - 60000); sp(`q${t}2`, 'general-purpose', `QA ${t}팀 ${t}-2`); work(`q${t}2`, 'Bash') }
 sp('x1', 'Explore', '조사 1'); sp('x2', 'Explore', '조사 2'); work('x1', 'Grep'); work('x2', 'Read')
 sp('d1', 'designer', '시안'); work('d1')
 sp('L1', 'executor', '개발 이끌기'); sp('k1', 'executor', '조각 1', { parentAgentId: 'L1' }); sp('k2', 'executor', '조각 2', { parentAgentId: 'L1' })
 for (const id of ['L1', 'k1', 'k2']) work(id)
+}
 if (extra === '서류') {
   // 놓친 일: 디자이너가 적어 둔 할 일 한 줄이 안 끝남 · 팀장 목록에 안 끝난 줄 · 리서처 x2 중단 → 각 자리 근처 바닥에
   o = office.onTodoMarks(o, 'd1', 'TodoWrite', { todos: [{ content: '아이콘 색 맞추기', status: 'pending' }] })
@@ -33,7 +41,7 @@ const frames = []
 for (const [cols, budget, dt] of [[+width, +rows, 0], [+width, +rows, 700], [Math.floor(+width / 2), +rows, 0], [+width, 70, 0]]) {
   const units = office.unitsOf(o, now + dt)
   const p = scene.plan(units, cols, budget)
-  const L = scene.layout(o, cols, office.unitOf, office.familyOfW, { spots: p.spots, units, k: p.k })
+  const L = scene.layout(o, cols, office.unitOf, office.familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles })
   const size = scene.outOf(L)
   frames.push({ L: { cols: size.cols, rows: size.rows }, px: scene.zoom(scene.draw(o, L, now + dt, 14), L) })
   console.log(`${cols}칸 · 그림 몫 ${budget}줄 → 배율 ${p.k} · ${size.cols}×${size.rows} · 자리 ${p.spots.map((x) => x.label).join(', ')}`)
