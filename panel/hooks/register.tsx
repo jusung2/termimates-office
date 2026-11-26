@@ -8,14 +8,14 @@ import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
 import { HOLD, IDLE_DEMO, startDemo, STEPS } from './demo'
 import {
-  addUsage, boardOf, EMPTY, familyOfW, jobOfW, log, onComplete, onPrompt, onRename, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart,
-  onTurnStart, onWait, onWaitEnd, readerOf, reviewLine,
+  addUsage, boardOf, donePaper, EMPTY, familyOfW, isAsk, jobOfW, log, onComplete, onMissed, onPrompt, onRename, onSpawn, onStart, onTalk,
+  onTodoMarks, onTodos, onToolEnd, onToolStart, onTurnStart, onWait, onWaitEnd, paperLine, PICK_MS, pickPaper, readerOf, reviewLine,
   running, set, toShelf, unitOf, unitsOf, webSeats,
 } from './office'
 import {
   adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
 } from './power'
-import { CW, draw, encode, isGone, isMoving, layout, outOf, plan, seatsOf, TAG_ROW, xOf, zoom } from './scene'
+import { CW, draw, encode, isGone, isMoving, layout, outOf, paperSpots, plan, seatsOf, TAG_ROW, xOf, zoom } from './scene'
 import type { Layout } from './scene'
 import { reportOf, stepsFromLog } from './replay'
 import { setLocalNotes, skillNote, skillRole } from './skills'
@@ -376,6 +376,7 @@ async function writeSnap($: EngineInterface) {
   if (!webOn || !snapDir) return
   try {
     if (!server && Date.now() - serverTriedAt > 15000) runServer($, snapDir)
+    await webPicks($)
     const dm = await read($, demo)
     const o = dm.running ? dm.office : await read($, office)
     const pw = dm.running ? dm.power : await read($, power)
@@ -454,6 +455,53 @@ async function fillPrompt($: EngineInterface, text: string) {
     $.ui.toast(r.isFilled ? '입력창에 넣었어요. 확인하고 Enter 를 누르세요' : '입력창에 못 넣었어요')
   } catch {
     $.ui.toast('입력창에 못 넣었어요')
+  }
+}
+
+// -- 놓친 일 서류: 누르면 팀장이 주워 와 확인 → 입력창에 「놓친 일 다시 확인: …」 (보내기는 사람이) -----------------
+const picking = new Set<string>()
+async function pickUp($: EngineInterface, id: string) {
+  if (picking.has(id)) return
+  const p = (await read($, office)).papers?.find(x => x.id === id && x.picked === undefined)
+  if (!p) return
+  picking.add(id)
+  try {
+    await change($, (o, now) => pickPaper(o, id, now))
+    await $.clock.sleep(PICK_MS) // 걸어가 줍고 → 자리로 돌아와 → 읽어 보기 (그림 쪽이 같은 시간으로 보여 줌)
+    const text = paperLine(p)
+    let ok = false
+    try {
+      ok = (await $.prompt.fill({ text })).isFilled
+      if (ok) $.ui.toast('입력창에 「놓친 일 다시 확인」 을 넣었어요. 확인하고 Enter 를 누르세요')
+    } catch {
+      // 아래 복사로
+    }
+    if (!ok) {
+      // 입력창에 못 넣으면 (대화 상자가 떠 있음 등) 복사해 두고 문장을 보여 준다
+      ok = await $.ui.copy({ text }).then(r => r.isCopied, () => false)
+      $.ui.toast(ok ? `입력창에 못 넣어 복사했어요: ${text}` : `입력창에 못 넣었어요: ${text}`)
+    }
+    await change($, (o, now) => donePaper(o, id, now, !ok))
+  } finally {
+    picking.delete(id)
+  }
+}
+
+/** 웹에서 누른 서류: serve.py 가 <세션>.pick 에 적어 둔 서류 id 들을 읽고 비운다 (0.3초마다, 웹을 켰을 때만) */
+async function webPicks($: EngineInterface) {
+  if (!snapDir || !sid) return
+  const path = `${snapDir}/${sid}.pick`
+  try {
+    if (!(await $.fs.exists(path))) return
+    const text = String(await $.fs.read(path)).trim()
+    if (!text) return
+    await $.fs.write(path, '')
+    for (const line of text.split('\n')) {
+      const id = (JSON.parse(line) as { id?: unknown }).id
+      if (typeof id === 'string') void pickUp($, id)
+    }
+  } catch {
+    // 못 읽으면 다음에
   }
 }
 
@@ -698,7 +746,7 @@ export const register: Register = on => {
       if (known) await change($, (o, now) => toShelf(o, readerOf(o, 'main', cmd, known.description), cmd, now))
     }
     if (!e.isMeta && !e.command) {
-      await change($, (o, now) => onWaitEnd(onPrompt(o, e.text, now), now))
+      await change($, (o, now) => ({ ...onWaitEnd(onPrompt(o, e.text, now), now), asked: isAsk(e.text) })) // 「했어?」 물음이면 답에서 놓친 일을 본다
       const t = await $.clock.now()
       jobLog = { from: t, log: [{ t, k: 'prompt', a: [clip(e.text, 60)] }] }
       await update($, replay, () => ({ from: t, log: [] })).catch(() => undefined) // 지난 보고서는 내림
@@ -729,6 +777,10 @@ export const register: Register = on => {
     const failed = ran.deny === undefined && ran.isError === true
     const errText = failed ? String((ran as { text?: string }).text ?? '실패') : undefined
     await change($, (o, now) => onToolEnd(o.waiting?.who === who ? onWaitEnd(o, now) : o, who, tool, target, sub, failed, errText, now))
+    // 놓친 일 서류용 할 일 흔적: 누가 적었는지 · 끝냈는지 (도구가 성공했을 때만. TaskCreate 의 id 는 결과에서)
+    if ((tool === 'TodoWrite' || tool === 'TaskCreate' || tool === 'TaskUpdate') && ran.deny === undefined && !failed) {
+      await change($, o => onTodoMarks(o, who, tool, raw, ran.result))
+    }
     void rec($, 'end', [who, tool, target, sub, failed, errText ? clip(errText, 120) : undefined])
     return ran
   }).catch(($, e, next) => next(e))
@@ -796,7 +848,7 @@ export const register: Register = on => {
     const ran = await next(e)
     const id = e.agentId
     await count($, id, e.usage)
-    await change($, (o, now) => onComplete(id ? o : onWaitEnd(o, now), id, e.answer, e.isAborted, now))
+    await change($, (o, now) => onMissed(onComplete(id ? o : onWaitEnd(o, now), id, e.answer, e.isAborted, now), id, e.answer, e.isAborted, now))
     // 검사 직원의 글은 줄바꿈째 더 길게 적어 둔다 (다시 보기에서도 「판정: …」 줄로 통과 · 반려를 똑같이 뽑게)
     const checker = id ? (await read($, office)).workers.find(w => w.id === id)?.checker : false
     await rec($, 'done', [id, checker ? e.answer.slice(0, 1500) : clip(e.answer, 200), e.isAborted])
@@ -1099,7 +1151,20 @@ export const register: Register = on => {
     ) : null
 
     // 그림 몫 = 패널 줄 수 - 위 글줄 - 아래 카드 몫. 위 글줄은 지금 보이는 줄을 세고, 카드는 지난번 높이로
-    const headRows = 1 + (live ? 0 : 1) + 3 + (tired ? 1 : 0) + (waitRow ? 1 : 0) + (reportLine ? 1 : 0) +
+    // 📄 놓친 일 서류: 숫자 키(창을 고른 뒤) · Tab · 눌러서 고르면 팀장이 주워 와 입력창에 「놓친 일 다시 확인: …」
+    const lost = live ? (o.papers ?? []).filter(p => p.picked === undefined) : []
+    const paperRow = lost.length ? (() => {
+      const out: JSX.Element[] = [<Text key="ph" bold color="warning">{`📄 놓친 일 ${lost.length}장 `}</Text>]
+      let used = dw(`📄 놓친 일 ${lost.length}장 `)
+      for (const [i, p] of lost.slice(0, 9).entries()) {
+        const label = `[${i + 1}] ${clip(p.text, 16)}`
+        if (used + dw(label) + 1 > width) break
+        used += dw(label) + 1
+        out.push(<Button key={'paper-' + p.id} plain hotkey={String(i + 1)} onPress={() => void pickUp($, p.id)}><Text color="warning" underline>{label}</Text></Button>, <Text key={'pg' + i}> </Text>)
+      }
+      return <Box key="papers">{out}</Box>
+    })() : null
+    const headRows = 1 + (live ? 0 : 1) + 3 + (tired ? 1 : 0) + (waitRow ? 1 : 0) + (reportLine ? 1 : 0) + (paperRow ? 1 : 0) +
       wrapped(o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음', width) + wrapped(situation, width)
     lastRows = Math.max(1, (e.props.scroll?.bodyRows ?? 40) - headRows - cardRows)
     const L = sceneOf(o, width, lastRows, now)
@@ -1306,6 +1371,15 @@ export const register: Register = on => {
               <Text inverse={!!v.shelf} color={v.shelf ? 'warning' : undefined} bold>{v.shelf ? '📚 책장 ▴' : '📚 책장 ▾'}</Text>
             </Button>
           </Box>
+          {paperSpots(o, L).filter(x => x.p.picked === undefined).map(x => {
+            // 바닥 서류 옆 번호 (위 「📄 놓친 일」 줄의 숫자 키와 같음). 눌러도 된다
+            const n = lost.findIndex(p => p.id === x.p.id) + 1
+            return n > 0 && n <= 9 ? (
+              <Box key={'lost-' + x.p.id} position="absolute" top={Math.floor((x.y / 2) * K)} left={xOf(L, x.x + 4)}>
+                <Button key={'lost-btn-' + x.p.id} plain onPress={() => void pickUp($, x.p.id)}><Text color="warning" bold inverse>{String(n)}</Text></Button>
+              </Box>
+            ) : null
+          })}
           {(() => {
             // 청록 깔개(같은 일을 나란히 하는 직원) 위 짧은 글: 그 자리 줄의 통로 칸(이름표 한 줄 아래, 아랫줄 말풍선 위)에
             // 「같은 일 ×n」 → 모자라면 「같은일×n」 → 그래도 안 되면 안 씀. 줄이 바뀐 묶음은 첫 줄에만
@@ -1416,6 +1490,7 @@ export const register: Register = on => {
         {tired}
         {waitRow}
         {reportLine}
+        {paperRow}
         <Text bold>{o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음'}</Text>
         <Text dimColor>{situation}</Text>
         {scene}
@@ -1429,6 +1504,7 @@ export const register: Register = on => {
             <Text><Text bold>직원을 누르면</Text> 지금 하는 일 · 넘긴 서류 · 피로도 · 전기세가 보이고, 아래 칸에 말을 걸거나 이름을 바꿀 수 있어요 (말은 보낼 때만 토큰).</Text>
             <Text><Text bold>📚 책장</Text>을 누르면 내 스킬 목록 — 「쓰기」 를 누르면 입력창에 /스킬 이 들어가요. <Text bold>명부</Text> 탭은 내가 만든 에이전트와 「맡기기」.</Text>
             <Text><Text bold>🔔</Text> 허락 · 질문을 기다리면 맨 위에 노란 줄 (12초 넘으면 알림). 일이 끝나면 <Text bold>📋 보고서 · ▶ 다시 보기</Text>.</Text>
+            <Text><Text bold>📄 놓친 일</Text> = 할 일 목록에 안 끝난 줄 · 「했어?」 에 「깜빡했어요」 · 직원 중단 → 그 자리 바닥에 서류. 숫자 키(창을 고른 뒤)나 눌러서 고르면 팀장이 주워 와 입력창에 「놓친 일 다시 확인: …」 (Enter 는 직접).</Text>
             <Text><Text bold>맨 위</Text> 피로도 = 대화가 얼마나 찼는지 (70% 넘으면 새 세션 권함) · 전기세 = 쓴 토큰.</Text>
             <Text> </Text>
             <Text bold>명령</Text>

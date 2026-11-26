@@ -15,6 +15,8 @@
   // ---- 시간 규칙 ----
   const ASSIGN_MS = 1300, READ_MS = 4000, BOSS_MS = 7000, STAMP_MS = 1800; // STAMP_MS: 심사대에서 도장 찍고 서류가 날아가는 시간
   const WALK_SPEED = 0.09; // 걷는 속도 (월드 픽셀/ms). 거리 ÷ WALK_SPEED = 순수 걷기 시간.
+  // 놓친 일 서류: 팀장이 걸어가 줍고 돌아오는 시간 · 그 뒤 자리에서 읽고 입력창에 넣기까지 (패널 office.ts PICK_WALK_MS · PICK_MS 와 같게)
+  const PICK_WALK_MS = 5600, PICK_MS = 7000;
 
   // ---- 배치 치수 (월드 픽셀 = 캐릭터 픽셀) ----
   const SLOT_W = 100, ROW_H = 128, WALL_H = 72, SIDE = 64, RIGHT = 16, SHELF_W = 112, MIN_W = 380;
@@ -477,6 +479,29 @@
     }
   }
 
+  // ---- 놓친 일 서류 (패널 office.ts onMissed: 흔적 있는 것만) ----
+  // 그 일을 맡았던 자리 바로 위 통로 바닥에 떨어져 있다. 자리가 없으면 · 팀장 것이면 팀장 책상 왼쪽 큰 복도
+  function paperSpots(o) {
+    const n = new Map(), lead = L.lead;
+    if (!lead) return [];
+    return (o.papers || []).map((p) => {
+      const s = p.who === 'main' ? null : L.seats.find((x) => !x.lead && ((x.worker && x.worker.id === p.who) || (x.members || []).some((m) => m.id === p.who)))
+        || L.seats.find((x) => !x.lead && (x.pick || x.key) === p.unit) || null;
+      const at = s || lead, i = n.get(at.key) || 0;
+      n.set(at.key, i + 1);
+      if (!s) return { p, x: Math.max(SIDE + 10, lead.cx - 84 - i * 16), y: L.hallFoot - 3, row: -1 };
+      return { p, x: s.sx + SLOT_W - 24 - i * 16, y: (s.row === 0 ? L.hallFoot : L.aisleFoot(s.row - 1)) - 3, row: s.row };
+    });
+  }
+  /** 바닥에 떨어진 종이 (조금 비뚤게 · 접힌 귀퉁이 · 빨간 줄) + 위에서 통통 튀는 「!」 */
+  function drawLost(c, x, y, frame) {
+    R(c, x + 1, y + 1, 14, 3, 'rgba(0,0,0,0.25)');
+    R(c, x, y - 8, 13, 9, '#fffdf5'); R(c, x + 1, y - 9, 12, 1, '#fffdf5'); R(c, x + 10, y - 8, 3, 3, '#d9d2c3');
+    R(c, x + 2, y - 6, 7, 1, '#e03131'); R(c, x + 2, y - 4, 8, 1, '#adb5bd'); R(c, x + 2, y - 2, 6, 1, '#adb5bd');
+    const by = y - 20 - (frame % 2);
+    R(c, x + 5, by, 3, 6, '#e03131'); R(c, x + 5, by + 8, 3, 3, '#e03131'); R(c, x + 6, by + 1, 1, 4, '#ff8787');
+  }
+
   // ---- 움직임 (패널 scene.ts motionOf 와 같은 규칙) ----
   function toHall(s, x) {
     const start = { x: s.cx, y: s.seatFoot };
@@ -534,6 +559,18 @@
       if (lAge >= 0) return { m: { pts: leavePts, p: ease(lAge / leaveMs) } };
     }
     if (who) return {}; // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
+    // 놓친 일 서류: 팀장이 그 자리 근처로 걸어가 줍고 → 자리로 돌아온다 (그 뒤 자리에서 읽음)
+    if (s.lead && !who) {
+      const got = paperSpots(o).find((x) => x.p.picked != null && now - x.p.picked >= 0 && now - x.p.picked < PICK_WALK_MS);
+      if (got) {
+        const tx = got.x - 10;
+        const pts = got.row <= 0 ? toHall(s, tx) : toHall(s, L.corridorX).concat([{ x: L.corridorX, y: L.aisleFoot(got.row - 1) }, { x: tx, y: L.aisleFoot(got.row - 1) }]);
+        const t = (now - got.p.picked) / PICK_WALK_MS;
+        if (t < 0.45) return { m: { pts, p: ease(t / 0.45) } };
+        if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.5 ? 'doc' : null, reach: true } };
+        return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'doc' } };
+      }
+    }
     // 책장: 스킬을 쓰면 갔다 옴
     const sh = [...(o.shelf || [])].reverse().find((x) => x.who === id);
     const sAge = sh ? now - sh.at : -1;
@@ -762,6 +799,7 @@
     const shelfMsFor = (who) => { const seat = L.seats.find((s) => !!s.worker && (s.lead ? 'main' : s.worker.id) === who); return seat ? lenOf(toHall(seat, L.shelf.x + 40)) / (WALK_SPEED * 0.4) : 15000; };
     const taken = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm * 0.46 && now - x.at < sm + READ_MS; }).map((x) => slotOf(x.book)));
     const readers = new Set((o.shelf || []).filter((x) => { const sm = shelfMsFor(x.who); return now - x.at >= sm && now - x.at < sm + READ_MS; }).map((x) => x.who));
+    if ((o.papers || []).some((p) => p.picked != null && now - p.picked >= PICK_WALK_MS && now - p.picked < PICK_MS + 1500)) readers.add('main'); // 주워 온 서류를 자리에서 펴 봄
 
     // 사장님 지시가 막 들어왔으면: 사장님이 문으로 들어와 팀장에게 지시서를 건네고 나간다
     let boss = null;
@@ -790,6 +828,11 @@
     drawGroups(c);
     for (const s of L.seats) drawChair(c, s);
     const things = [{ foot: L.shelf.y + L.shelf.h, paint: () => drawShelf(c, taken, now) }, { foot: L.doorFoot + 1, paint: () => drawDoorFront(c) }];
+    // 놓친 일 서류: 팀장이 주워 들기 전까지 바닥에 (지나가는 사람이 위에 그려지게 발 높이 = 종이)
+    for (const x of paperSpots(o)) {
+      if (x.p.picked != null && now - x.p.picked >= PICK_WALK_MS * 0.5) continue;
+      things.push({ foot: x.y, paint: () => drawLost(c, x.x, x.y, frame) });
+    }
     // 걷는 사람 하나 (직원 · 팀장 · 사장님 같이 씀). 문 안쪽으로 들어가면 서서히 사라진다
     const walker = (m, look, expr, onAt) => {
       const len = lenOf(m.pts), pt = at(m.pts, m.p * len), walking = m.p > 0.001 && m.p < 0.999;
@@ -1133,6 +1176,8 @@
       hits.push(D.mode === 'hall' ? { key: '__review', x: D.x - 10, y: S2.y - 4, w: D.w + 56, h: D.qy - S2.y + 6 } : { key: '__review', x: D.sx, y: D.sy + 4, w: SLOT_W, h: ROW_H - 4 });
     }
     hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 옆에 소식 전체 목록 (책장처럼)
+    // 바닥 서류는 자리보다 먼저 (자리 칸 위에 떨어져 있어도 서류가 눌린다)
+    for (const x of paperSpots(snap.office)) if (x.p.picked == null) hits.unshift({ key: '__paper:' + x.p.id, x: x.x - 4, y: x.y - 24, w: 22, h: 30 });
   }
   function roundRect(c, x, y, w, h, r) {
     c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
@@ -1306,6 +1351,29 @@
       '검사 받는 직원은 검사 직원이 출근하기 직전에 일을 끝낸 직원으로 짐작해요. 통과 · 반려는 검사 직원이 남긴 마지막 글에서 뽑고, 애매하면 「검토 끝」 으로만 보여요.</div>';
   }
 
+  // 📄 놓친 일 서류: 누르면 패널에 「주워 와」 를 전한다 (serve.py /api/pick → 패널이 팀장을 걸려 보내고 입력창에 문장).
+  // 패널에 못 전하면(서버가 예전 것 · 패널이 꺼짐) 문장을 카드에 보여 주고 복사 단추로
+  const picks = new Map(); // 서류 id → 'sending' · 'sent' · 'fail'
+  function pick(id) {
+    if (picks.get(id) === 'sending' || picks.get(id) === 'sent') return;
+    picks.set(id, 'sending');
+    fetch('/api/pick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: (snap && snap.session) || 'session', id }) })
+      .then((r) => r.json()).then((d) => picks.set(id, d && d.ok ? 'sent' : 'fail'), () => picks.set(id, 'fail')).then(() => { if (sel === '__paper:' + id) card(); });
+  }
+  const WHY = { todo: '할 일 목록에 안 끝난 줄이 남았어요', said: '「했어?」 물음의 답에 놓쳤다는 말이 있었어요', abort: '맡은 직원이 중단됐어요' };
+  function paperCard(id) {
+    const p = ((snap.office && snap.office.papers) || []).find((x) => x.id === id);
+    const head = `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📄 놓친 일 서류</h2><div class="kind">${p ? `${esc(p.who === 'main' ? '팀장' : p.unit)} 자리 · ${hhmm(p.at)}` : ''}</div></div></div>`;
+    if (!p) return head + '<div class="row">이 서류는 이미 넘겼어요 (또는 그 일이 끝나서 치웠어요).</div>';
+    const line = `놓친 일 다시 확인: ${p.text}`, st = picks.get(id);
+    const now = st === 'fail' ? '<div class="paper err">패널에 못 전했어요 — 아래 문장을 복사해 Claude Code 입력창에 붙여 넣으세요.</div>'
+      : p.picked != null ? `<div class="row"><b>팀장</b>${Date.now() - p.picked < PICK_MS ? '서류를 주워 와 확인하는 중 → 곧 Claude Code 입력창에 문장이 들어가요' : '입력창에 넣었어요. 확인하고 Enter 는 직접'}</div>`
+        : st ? '<div class="row"><b>팀장</b>주우러 가는 중…</div>' : '<div class="row"><b>팀장</b>바닥의 서류를 누르면 주우러 가요</div>';
+    return head + `<div class="row"><b>왜</b>${esc(WHY[p.why] || '')}</div>` + `<div class="paper">${esc(line)}</div>` + now +
+      `<button class="more" data-copy="${esc(line)}">📋 문장 복사</button>` +
+      '<div class="note">흔적 있는 것만 서류가 돼요: 할 일 목록(TodoWrite · TaskCreate)에 안 끝난 줄 · 「했어?」 물음의 답에 「깜빡 · 놓쳤 · 못 했」 · 직원 중단. 그 일이 나중에 끝나면 서류도 사라져요. 보내기는 직접 (보내기 전엔 토큰 0).</div>';
+  }
+
   // 👥 명부: 내가 만든 에이전트 (.claude/agents)
   function rosterCard() {
     const list = snap.roster || [];
@@ -1341,6 +1409,7 @@
     <div class="row"><b>📚 책장</b>내 스킬 목록과 한 줄 설명. 스킬을 쓰면 담당 직원이 책을 꺼내 와 읽어요.</div>
     <div class="row"><b>🔍 심사대</b>검토 · 리뷰를 맡은 직원이 오면 복도 옆에 생겨요. 검사 받는 직원이 서류를 들고 줄 서고, 번호판에 검토 중 · 통과 · 반려. 누르면 반려 이유까지.</div>
     <div class="row"><b>📋 게시판</b>사무실 소식 최근 3줄. 누르면 오른쪽에 소식 전체 목록.</div>
+    <div class="row"><b>📄 놓친 일 서류</b>할 일 목록에 안 끝난 줄 · 「했어?」 물음에 「깜빡했어요」 · 직원 중단처럼 흔적이 있으면 그 자리 바닥에 떨어져요. 누르면 팀장이 주워 와 Claude Code 입력창에 「놓친 일 다시 확인: …」 을 넣어 줘요 (보내기는 직접).</div>
     <div class="row"><b>🔔 확인 필요</b>Claude 가 허락 · 질문의 답을 기다리면 맨 위에 노란 줄이 떠요. Claude Code 창으로 가서 답해 주세요.</div>
     <div class="row"><b>📋 보고서</b>일이 끝나면 맨 위 「이번 일 보고서」. 다시 보기는 패널에서 누르면 여기에도 같이 보여요.</div>
     <div class="row"><b>👥 명부</b>내가 만든 에이전트 목록. 「맡기기 문장 복사」 → 입력창에 붙여 넣기.</div>
@@ -1367,6 +1436,12 @@
     if (sel === '__help') {
       if (lastCardHtml !== HELP) { lastCardHtml = HELP; $('cardBody').innerHTML = HELP;
         const f = $('cardFace'), fc = f && f.getContext('2d'); if (fc) { fc.imageSmoothingEnabled = false; fc.drawImage(S.get('lead', { pose: 'thumb', expr: 'happy' }), 0, 0); } }
+      el.hidden = false; return;
+    }
+    if (String(sel).startsWith('__paper:')) {
+      const html = paperCard(sel.slice(8));
+      if (html !== lastCardHtml) { lastCardHtml = html; $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d'); if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('lead', { pose: 'read' }), 0, 0); } }
       el.hidden = false; return;
     }
     if (sel === '__news') {
@@ -1527,6 +1602,7 @@
   canvas.addEventListener('click', (ev) => {
     const h = hitAt(ev);
     if (h && h.key === '__news') { openNews(); return; }
+    if (h && h.key.startsWith('__paper:')) pick(h.key.slice(8));
     const was = !!sel; sel = h ? h.key : null; card(); news(); if (was !== !!sel) refit();
   });
   canvas.addEventListener('mousemove', (ev) => { const h = hitAt(ev); if ((h && h.key) !== hover) { hover = h && h.key; canvas.classList.toggle('hand', !!h); } });
@@ -1609,5 +1685,5 @@
   requestAnimationFrame(loop);
 
   // 시험용: 화면 없이 배치만 확인
-  window.__termimates = { layout: (W, Hmax) => layout(W, Hmax), take, motionOf: (s, now, who) => motionOf(snap.office, s, now, who), boxes: () => boxes, world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
+  window.__termimates = { layout: (W, Hmax) => layout(W, Hmax), take, motionOf: (s, now, who) => motionOf(snap.office, s, now, who), boxes: () => boxes, papers: () => paperSpots(snap.office), hits: () => hits, click: (k) => { if (k.startsWith('__paper:')) pick(k.slice(8)); sel = k; card(); return $('cardBody').innerHTML; }, world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
 })();

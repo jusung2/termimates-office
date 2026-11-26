@@ -1,8 +1,8 @@
 // 픽셀 사무실: 바닥 · 벽 · 책상 · 직원 캐릭터를 한 장의 Raster(색 칸)로 그린다.
 // 한 칸 = 글자 '▀' 하나 = 위 픽셀(글자색) + 아래 픽셀(배경색). 그래서 세로 픽셀은 칸의 2배.
 
-import type { Office, Status, Worker } from '../types'
-import { fold, foldSteps } from './office'
+import type { Office, Paper, Status, Worker } from '../types'
+import { fold, foldSteps, PICK_MS, PICK_WALK_MS } from './office'
 import type { Spot, UnitInfo } from './office'
 
 export const CW = 12 // 책상 한 자리 가로 칸
@@ -480,6 +480,33 @@ function bookAt(b: Px, x: number, y: number, color: number) {
   dot(b, Math.round(x) + 1, Math.round(y), C.page)
 }
 
+/** 놓친 일 서류: 바닥에 떨어진 종이 한 장 (흰 종이 + 빨간 줄 + 그림자) */
+function lostPaper(b: Px, x: number, y: number) {
+  fill(b, x, y + 2, 4, 1, 0x7a5a3a) // 그림자
+  fill(b, x, y, 4, 2, C.paper)
+  dot(b, x + 1, y, 0xd64541)
+  dot(b, x + 2, y + 1, 0xd64541)
+}
+
+export type PaperSpot = { p: Paper; x: number; y: number; k: number } // x · y: 1배 픽셀 (y = 종이 윗줄), k: 그 길(0 = 큰 복도)
+
+/** 서류가 떨어진 곳: 그 일을 맡았던 자리 바로 위 통로 바닥 (자리가 없으면 · 팀장 것이면 팀장 책상 왼쪽 큰 복도) */
+export function paperSpots(o: Office, L: Layout): PaperSpot[] {
+  const lead = L.seats[0]
+  if (!lead) return []
+  const n = new Map<string, number>()
+  return (o.papers ?? []).map(p => {
+    const s = p.who === 'main' ? undefined
+      : L.seats.find(x => x.key !== 'main' && (x.ids?.includes(p.who) || x.worker?.id === p.who)) ?? L.seats.find(x => x.key !== 'main' && (x.pick ?? x.key) === p.unit)
+    const at = s ?? lead
+    const i = n.get(at.key) ?? 0
+    n.set(at.key, i + 1)
+    if (!s) return { p, x: Math.max(LEFT, lead.col - 6 - i * 5), y: aisleFoot(0) - 3, k: 0 }
+    const k = rowOf(s) - 1
+    return { p, x: s.col + 7 - i * 5, y: aisleFoot(k) - 3, k }
+  })
+}
+
 const TRIP_MS = 6000 // 서류 들고 팀장에게 갔다 오기
 const ASSIGN_MS = 1300 // 일 맡길 때 서류가 날아가는 시간
 const SHELF_MS = 7500 // 책장에 가서 책 꺼내 오기
@@ -568,6 +595,18 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m
     if (lAge >= 0) return { m: { pts: toHall(s, DOOR_X), p: ease(lAge / LEAVE_MS) }, gone: false }
   }
   if (who) return { gone: false } // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
+  // 놓친 일 서류: 팀장이 그 자리 근처로 걸어가 줍고 → 자리로 돌아온다 (그 뒤 자리에서 읽음)
+  if (s.key === 'main') {
+    const got = paperSpots(o, L).find(x => x.p.picked !== undefined && now - x.p.picked >= 0 && now - x.p.picked < PICK_WALK_MS)
+    if (got) {
+      const tx = got.x - 3
+      const pts = got.k === 0 ? toHall(s, tx) : [...toHall(s, LEFT - 3), { x: LEFT - 3, y: standY(got.k) }, { x: tx, y: standY(got.k) }]
+      const t = (now - got.p.picked!) / PICK_WALK_MS
+      if (t < 0.45) return { m: { pts, p: ease(t / 0.45) }, gone: false }
+      if (t < 0.55) return { m: { pts, p: 1, carry: t > 0.5 ? 'paper' : undefined }, gone: false }
+      return { m: { pts, p: 1 - ease((t - 0.55) / 0.45), carry: 'paper' }, gone: false }
+    }
+  }
   // 3) 책장: 스킬을 쓰면 책장에 가서 그 책을 꺼내 와 읽는다
   const sh = [...(o.shelf ?? [])].reverse().find(x => x.who === id)
   const sAge = sh ? now - sh.at : -1
@@ -608,7 +647,7 @@ export function isGone(o: Office, L: Layout, key: string, now: number): boolean 
 export function isMoving(o: Office, now: number): boolean {
   const near = (at: number | undefined, ms: number) => at !== undefined && now - at >= 0 && now - at < ms
   return near(o.promptAt, BOSS_MS) || o.handoffs.some(h => near(h.at, TRIP_MS)) || o.assigns.some(a => near(a.at, ASSIGN_MS)) ||
-    (o.shelf ?? []).some(x => near(x.at, SHELF_MS)) ||
+    (o.shelf ?? []).some(x => near(x.at, SHELF_MS)) || (o.papers ?? []).some(p => near(p.picked, PICK_MS)) ||
     o.workers.some(w => near(w.started, ARRIVE_MS) || (w.ended !== undefined && now - w.ended < TRIP_MS + 1500 + LEAVE_MS))
 }
 
@@ -635,6 +674,8 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
   for (const x of o.shelf ?? []) if (now - x.at >= SHELF_MS * 0.46 && now - x.at < SHELF_MS + READ_MS) taken.add(slotOf(x.book))
   // 책을 들고 돌아온 사람은 잠깐 자리에서 그 책을 읽는다
   const readers = new Set((o.shelf ?? []).filter(x => now - x.at >= SHELF_MS && now - x.at < SHELF_MS + READ_MS).map(x => x.who))
+  // 주워 온 서류는 자리에서 펴 본다
+  if ((o.papers ?? []).some(p => p.picked !== undefined && now - p.picked >= PICK_WALK_MS && now - p.picked < PICK_MS + 1500)) readers.add('main')
 
   // 앞뒤 순서: 의자는 맨 뒤, 그다음 발이 위(멀리)에 있는 것부터 그린다 → 앞에 있는 게 뒤에 있는 걸 가린다
   // 같은 일을 나란히 하는 직원(twin): 청록 깔개 하나 위에 같은 책상 · 같은 옷 (묶음 표시)
@@ -670,6 +711,11 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
         }
       },
     })
+  }
+  // 놓친 일 서류: 바닥에 (팀장이 주워 들기 전까지). 지나가는 사람이 위에 그려지게 발 높이 = 종이 줄
+  for (const x of paperSpots(o, L)) {
+    if (x.p.picked !== undefined && now - x.p.picked >= PICK_WALK_MS * 0.5) continue
+    things.push({ foot: x.y + 2, paint: () => lostPaper(b, x.x, x.y) })
   }
   const boss = bossOf(o, L, now)
   if (boss) walker(boss, '사장님', '사장님')

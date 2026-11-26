@@ -167,6 +167,38 @@ if (!/접/.test(foldCard) || !/QA \d팀/.test(foldCard)) { console.error('접은
   if (!m.m || m.gone) { console.error('자리 이어받기: 앞사람이 안 걷고 사라짐', m); process.exit(1) }
   for (let t = 0; t < 400; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
 }
+// 놓친 일 서류: 맡았던 자리 근처 바닥에 · 누르면 패널에 전함(POST /api/pick) + 카드에 문장 · 복사. 주우러 가면 팀장이 걷는다
+{
+  const posts = []
+  sandbox.fetch = (url, init) => { posts.push([url, init && init.body]); return Promise.resolve({ json: () => Promise.resolve({ ok: true }) }) }
+  let g = OF.onPrompt(OF.EMPTY, '로그인 만들어줘', now - 20000)
+  g = OF.onSpawn(g, { id: 'px', type: 'Explore', description: '결제 코드 찾아 보기', background: true }, now - 15000)
+  g = OF.onTodoMarks(g, 'main', 'TodoWrite', { todos: [{ content: '시험 돌리기', status: 'pending' }] })
+  g = OF.onMissed(OF.onComplete(g, 'px', '', true, now - 9000), 'px', '', true, now - 9000)
+  g = OF.onMissed(g, undefined, '', false, now - 8000)
+  api.take({ ...snap, session: 'sess-w', office: g, ...OF.webSeats(g, now), board: null })
+  for (let t = 0; t < 200; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
+  const ps = api.papers()
+  if (ps.length !== 2 || ps.some((x) => !(x.x > 0 && x.y > 0))) { console.error('놓친 일 서류 자리가 이상함', ps); process.exit(1) }
+  const staff = api.layout(1000).seats.find((x) => x.key === '리서처')
+  const near = ps.find((x) => x.p.who === 'px')
+  if (!staff || Math.abs(near.x - staff.cx) > 60 || near.y > staff.sy + 10) { console.error('서류가 맡았던 자리 근처가 아님', near, staff && [staff.cx, staff.sy]); process.exit(1) }
+  const hit = api.hits().find((h) => h.key === '__paper:' + near.p.id)
+  if (!hit) { console.error('서류를 누를 자리가 없음'); process.exit(1) }
+  const html = api.click(hit.key)
+  if (!html.includes('놓친 일 다시 확인: 결제 코드 찾아 보기') || !html.includes('data-copy')) { console.error('서류 카드 이상', html.slice(0, 300)); process.exit(1) }
+  await new Promise((r) => setTimeout(r, 0))
+  if (!posts.some(([u, body]) => u === '/api/pick' && JSON.parse(body).id === near.p.id && JSON.parse(body).session === 'sess-w')) { console.error('패널에 줍기를 안 전함', posts); process.exit(1) }
+  // 패널이 주우러 간다고 적으면(picked) 팀장이 그 자리로 걷는다
+  const g2 = OF.pickPaper(g, near.p.id, now)
+  api.take({ ...snap, session: 'sess-w', office: g2, ...OF.webSeats(g2, now), board: null })
+  const lead = api.layout(1000).seats[0]
+  const mv = api.motionOf(lead, now + 1500)
+  if (!mv.m || !(mv.m.p > 0)) { console.error('팀장이 서류를 주우러 안 걸음', mv); process.exit(1) }
+  for (let t = 0; t < 7000; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
+  sandbox.fetch = () => Promise.resolve({ json: () => Promise.resolve(null) })
+  api.select(null)
+}
 els.stage.clientWidth = 1400; els.stage.clientHeight = 760
 api.take(snap)
 const L = api.layout(1000)
