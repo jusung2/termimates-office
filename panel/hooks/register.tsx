@@ -8,9 +8,9 @@ import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
 import { HOLD, IDLE_DEMO, QA_STEPS, startDemo, STEPS } from './demo'
 import {
-  addUsage, EMPTY, familyOfW, jobOfW, log, onComplete, onPrompt, onRename, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart,
-  onTurnStart, onWait, onWaitEnd, readerOf,
-  running, set, toShelf, unitOf,
+  addUsage, boardOf, EMPTY, familyOfW, jobOfW, log, onComplete, onPrompt, onRename, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart,
+  onTurnStart, onWait, onWaitEnd, readerOf, reviewLine,
+  running, set, toShelf, unitOf, unitsOf, webSeats,
 } from './office'
 import {
   adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
@@ -721,7 +721,9 @@ export const register: Register = on => {
     const id = e.agentId
     await count($, id, e.usage)
     await change($, (o, now) => onComplete(id ? o : onWaitEnd(o, now), id, e.answer, e.isAborted, now))
-    await rec($, 'done', [id, clip(e.answer, 200), e.isAborted])
+    // 검사 직원의 글은 줄바꿈째 더 길게 적어 둔다 (다시 보기에서도 「판정: …」 줄로 통과 · 반려를 똑같이 뽑게)
+    const checker = id ? (await read($, office)).workers.find(w => w.id === id)?.checker : false
+    await rec($, 'done', [id, checker ? e.answer.slice(0, 1500) : clip(e.answer, 200), e.isAborted])
     if (!id) {
       // 팀장이 일을 마치면 이번 일 보고서 (직원이 있었거나 한 일이 몇 개 이상일 때)
       try {

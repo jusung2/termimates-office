@@ -56,10 +56,15 @@ export function reportOf(o: Office, from: number, now: number, pw: Power): Repor
   const tokens = Object.values(by).reduce((n, t) => n + sum(t), 0)
   const topEntry = [...units.map(u => [u.key, u.tokens] as [string, number]), ['팀장', sum(by.main)] as [string, number]]
     .sort((a, b) => b[1] - a[1])[0]
+  const reviews = (o.reviews ?? []).filter(r => r.at >= from).map(r => {
+    const by = o.workers.find(w => w.id === r.by)
+    return { by: by ? unitOf(by) : '검사 직원', unit: r.unit, verdict: r.verdict, reason: r.reason, nth: r.nth }
+  })
   return {
     at: now, prompt: o.prompt ?? '', mins: Math.max(1, Math.round((now - from) / 60000)),
     fails: units.reduce((n, u) => n + u.fails, 0) + leadFails, papers: units.reduce((n, u) => n + u.papers, 0), tokens,
     top: topEntry && topEntry[1] > 0 ? topEntry[0] : undefined, units,
+    ...(reviews.length ? { reviews } : {}),
   }
 }
 

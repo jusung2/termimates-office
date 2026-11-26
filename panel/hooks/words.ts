@@ -288,3 +288,78 @@ export function hhmm(ms: number): string {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
+
+// -- 서로 검사하기 (심사대) ---------------------------------------------------------------------
+// 검사 직원 = 남이 한 일을 보고 통과 · 반려를 정하는 직원.
+// 1) 에이전트 종류 이름에 review · critic · verifier · judge · skeptic · audit 가 있으면 검사 직원.
+// 2) 종류 이름만으론 모를 때(general-purpose 같은 것)는 맡긴 일 설명 · 이름에 검토 · 리뷰 · 심사 · 검증 · review 같은 말이
+//    있고, 「구현 · 고치기 · 만들기」 처럼 자기가 직접 만드는 말이 없을 때만.
+// 3) QA · test 종류는 원래 「테스트 돌리기」 담당이라 검사 직원이 아니다. 맡긴 일에 검토 · 리뷰 · 심사 · 승인 · review ·
+//    approve 처럼 「남의 결과를 보고 판정」 하는 말이 있을 때만 검사 직원. (검증 · verify 는 테스트 돌리기에도 쓰는 말이라 QA 에선 안 셈)
+const CHECK_TYPE = /^(review|critic|verif|judge|skeptic|audit)/
+const CHECK_TEXT = /review|critic|verif|judge|검토|리뷰|심사|검증|평가해/i
+const CHECK_QA = /review|critic|judge|approv|검토|리뷰|심사|승인/i
+const MAKE_TEXT = /implement|\bbuild|\bwrite|\bfix|\badd\b|\bcreate|구현|만들|작성|고치|고쳐|수정해|추가/i
+
+export function isChecker(type: string, text = ''): boolean {
+  if (type === 'main') return false
+  const bare = (type.split(':').pop() ?? type).toLowerCase()
+  const ws = bare.split(/[^a-z]+/).filter(Boolean)
+  if (ws.some(w => CHECK_TYPE.test(w))) return true
+  if (ws.some(w => /^(qa|test)/.test(w))) return CHECK_QA.test(text)
+  if (!GENERIC.test(bare)) return false // 다른 일 하는 종류(executor · designer …)는 맡긴 일 글로 안 바꾼다
+  return CHECK_TEXT.test(text) && !MAKE_TEXT.test(text)
+}
+
+// 검사 결과: 검사 직원이 끝날 때 남긴 마지막 글에서 통과 / 반려를 보수적으로 뽑는다. 애매하면 「검토 끝」(done).
+// 「판정: … 」 「결과: … 」 같은 줄이 있으면 그 줄을 먼저 본다. 둘 다 섞여 있으면 센 말이 이긴다:
+// 센 반려(반려 · REJECT · changes requested · 통과 못 함)만 있으면 반려, 센 통과(통과 · 승인 · LGTM · APPROVE)만 있고
+// 약한 반려(실패 · 수정 필요)도 없으면 통과. 「실패 0건 · 실패 없음」 은 반려로 세지 않는다.
+export type Verdict = 'pass' | 'reject' | 'done'
+const NO_FAIL = /(?:실패|오류|에러)\s*(?:한\s*\S*\s*)?(?:없|0\s*(?:건|개|번)?)|(?:\b0|\bno|\bzero)\s+(?:fail(?:ed|ures?|s)?|errors?)\b/gi
+const NEG_PASS = /통과\s*(?:못|하지\s*못|하지\s*않|안\s*됨|불가|실패)|미통과|미승인|승인\s*(?:못|불가|거절|하지\s*않)|(?:not|n't|cannot)\s+(?:be\s+)?(?:approv\w*|pass\w*|lgtm)/gi
+const STRONG_REJECT = /반려|불합격|\breject(?:ed)?\b|changes?\s+requested|request(?:ing|ed)?\s+changes/i
+const WEAK_REJECT = /실패|수정\s*(?:이\s*)?필요|고쳐야|다시\s*해야|\bfail(?:ed|s|ure)?\b|needs?\s+(?:changes|work|revision|fix)/i
+const STRONG_PASS = /통과|승인|합격|\blgtm\b|\bapprov(?:e|ed)\b/i
+const WEAK_PASS = /\bpass(?:ed|es)?\b|문제\s*없/i
+const VERDICT_LINE = /^[\s#*>\-|]*(?:최종\s*)?(?:판정|결과|결론|verdict|result|decision|status)\s*[:：]/i
+
+function judge(text: string): Verdict | undefined {
+  const t = text.replace(NO_FAIL, ' ')
+  const negPass = new RegExp(NEG_PASS.source, 'i').test(t)
+  const rest = t.replace(NEG_PASS, ' ')
+  const sr = negPass || STRONG_REJECT.test(rest), wr = WEAK_REJECT.test(rest)
+  const sp = STRONG_PASS.test(rest), wp = WEAK_PASS.test(rest)
+  if (sr && !sp) return 'reject'
+  if (sp && !sr && !wr) return 'pass'
+  if (!sr && !sp) {
+    if (wr && !wp) return 'reject'
+    if (wp && !wr) return 'pass'
+  }
+  return undefined
+}
+
+export function verdictOf(text: string | undefined): Verdict {
+  const t = text ?? ''
+  const line = t.split('\n').find(l => VERDICT_LINE.test(l))
+  return (line && judge(line)) || judge(t) || 'done'
+}
+
+/** 반려 이유 한 줄: 「이유 · 사유 · because」 줄, 없으면 판정 줄 바로 다음 줄, 없으면 반려 말이 든 줄(그 말만 있으면 안 씀).
+ *  못 뽑으면 없음 — 이유 없이 「반려」 만 보여 준다 */
+export function reasonOf(text: string | undefined): string | undefined {
+  const lines = (text ?? '').split('\n').map(l => l.replace(/^[\s#*>\-|•·\d.)]]+/, '').replace(/\*\*/g, '').trim()).filter(Boolean)
+  const why = lines.find(l => /^(?:반려\s*)?(?:이유|사유|원인|reason|because|why)\s*[:：]?/i.test(l) || /때문/.test(l))
+  const strip = (l: string) => l
+    .replace(/^(?:최종\s*)?(?:판정|결과|결론|verdict|result|decision|status|반려\s*이유|이유|사유|원인|reason|why)\s*[:：]\s*/i, '')
+    .replace(/^(?:반려|reject(?:ed)?|fail(?:ed)?|changes\s+requested)\s*(?:✗|❌)?\s*[:：—–-]\s*/i, '').trim()
+  const bare = (l: string) => strip(l).replace(/[\s✗❌✕x!.,:：()（）-]|반려|reject(?:ed)?|changes\s+requested|fail(?:ed)?|실패|수정\s*필요/gi, '').length < 4
+  if (why && !bare(why)) return clip(strip(why), 60)
+  const i = lines.findIndex(l => VERDICT_LINE.test(l))
+  if (i >= 0 && lines[i + 1] && !bare(lines[i + 1]!)) return clip(strip(lines[i + 1]!), 60)
+  const hit = lines.find(l => (STRONG_REJECT.test(l) || WEAK_REJECT.test(l)) && !bare(l))
+  return hit ? clip(strip(hit), 60) : undefined
+}
+
+/** 반려 몇 번째: ① ② ③ … (번호판용) */
+export const circled = (n: number): string => (n >= 1 && n <= 20 ? String.fromCharCode(0x2460 + n - 1) : `${n}.`)
