@@ -232,9 +232,9 @@ test('촘촘한 윗부분 (패널): 그림 몫이 보통 섬 높이보다 낮아
   }
   const mount = (rows: number) => $.ui.mount({ plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
     props: { title: '사무실', isFocused: false, bodyColumns: 113, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} } })
-  await (await mount(120)).unmount() // 카드 높이를 한 번 재 둔다 (그림 몫 = 패널 높이 - 위 글줄 - 카드)
-  // 패널 89줄: 그림 몫이 62~65줄 → 보통 윗부분 섬(66줄)은 안 들어가고 촘촘한 윗부분으로 61줄
-  const ui = await mount(89)
+  // 패널 81줄: 위 글줄 + 짧은 카드(붐빌 때)를 빼면 그림 몫 62줄 → 보통 윗부분 섬(66줄)은 안 들어가고 촘촘한 윗부분으로 61줄
+  expect(await (async () => { const u = await mount(80); const [x] = await u.findAll({ type: 'Raster' }); await u.unmount(); return x!.props.rows })()).toBe(35) // 한 줄 모자라면 1배
+  const ui = await mount(81)
   const [r] = await ui.findAll({ type: 'Raster' })
   expect(r!.props.rows).toBe(61)
   expect(r!.props.columns).toBe(112)
@@ -242,5 +242,44 @@ test('촘촘한 윗부분 (패널): 그림 몫이 보통 섬 높이보다 낮아
   expect(btns.filter(b => b.key?.startsWith('isle-btn-')).map(b => b.text)).toEqual(expect.arrayContaining(['디자이너 ×3', '개발자 ×4']))
   expect(btns.find(b => b.key === 'shelf')?.text).toContain('책장')
   expect(btns.find(b => b.key === 'pick-main')).toBeDefined()
+  await ui.unmount()
+})
+
+test('패널 카드 줄이기: 피로도 · 전기세 몫 한 줄, 「지금:」 · 사장님 지시는 위 글줄과 겹쳐서 안 씀, 붐비면 맡긴 일 3줄 + 「외 n건」 · 한 일 2줄, 그림 몫은 이번 카드 높이로', async ($, on) => {
+  mock.clock(on, { now: Date.UTC(2026, 10, 24, 5, 0, 0) })
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', (_, e) => ({ model: 'claude-sonnet-5-5', agentId: 'a-' + e.tool_use_id }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '회원가입', wait: false, origin: { kind: 'composer' } })
+  const spawn = async (types: string[], from = 0) => {
+    for (const [i, t] of types.entries()) {
+      await $.agent.spawn({ tool_use_id: 't' + (from + i), prompt: '일', description: `일 ${from + i}`, subagentType: t,
+        provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false })
+    }
+  }
+  const mount = (cols: number, rows: number) => $.ui.mount({ plugin: 'termimates', component: 'Pane', requestId: 'office', surface: 'terminal',
+    props: { title: '사무실', isFocused: false, bodyColumns: cols, placement: 'dock', scroll: { offset: 0, bodyRows: rows }, view: {} } })
+  const texts = async (ui: Awaited<ReturnType<typeof mount>>) => (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  // 적을 때(4명): 맡긴 일 4건 다, 「외 n건」 없음
+  await spawn(['designer', 'executor', 'verifier', 'planner'])
+  let ui = await mount(113, 80)
+  let t = await texts(ui)
+  expect(t.some(x => x.startsWith('팀장 · 메인 Claude'))).toBe(true)
+  expect(t.some(x => x.startsWith('지금:'))).toBe(false) // 위 「팀장: …」 줄과 같은 말
+  expect(t.some(x => x.startsWith('사장님 지시:'))).toBe(false) // 위 「사장님 지시 「…」」 줄과 같은 말
+  expect(t.filter(x => x.startsWith('  ') && x.includes(' — 일 ')).length).toBe(4)
+  expect(t.some(x => /외 \d+건/.test(x))).toBe(false)
+  await ui.unmount()
+  // 붐빌 때(10명): 맡긴 일은 3줄 + 「외 7건」
+  await spawn(['designer', 'designer', 'executor', 'executor', 'executor', 'Explore'], 4)
+  ui = await mount(113, 80)
+  t = await texts(ui)
+  expect(t.some(x => x === '맡긴 일 10건:')).toBe(true)
+  expect(t.filter(x => x.startsWith('  ') && x.includes(' — 일 ')).length).toBe(3)
+  expect(t.some(x => x.includes('외 7건'))).toBe(true)
   await ui.unmount()
 })

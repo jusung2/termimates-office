@@ -332,6 +332,9 @@ export function packIsles(isles: Isle[], avail: number, gap: number, max: number
   return rows.length <= max ? rows : undefined
 }
 
+/** 붐비는가: 그림에 앉을 자리(파트장 아래 직원 빼고)가 섬 배치 후보만큼 (그러면 패널 카드도 짧게) */
+export const isCrowded = (units: UnitInfo[]): boolean => (foldSteps(units.filter(u => !u.boss))[0] ?? []).length >= ISLE_MIN
+
 /** 터미널: 「2배 → 1.5배 → 1배 → 접기 → +n」. width · rows = 그림이 쓸 수 있는 칸 · 줄 수.
  *  사람이 적어 줄인 폭(width ÷ 배율)으로도 한 줄에 다 앉고 그 배율 높이가 들어가면 크게, 아니면 1배로 줄 수에 맞춰 접는다.
  *  파트장 아래 직원(boss 있음)은 터미널에선 안 그린다 (파트장 이름표의 「+n」 · 카드로) */
