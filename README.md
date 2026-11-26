@@ -46,7 +46,7 @@ Claude 에게 일을 시키면 팀장과 직원들(기획자 · 디자이너 · 
 </tr>
 <tr>
 <td width="50%"><img src="docs/images/web-shelf.png" alt="책장 = 스킬 목록"><br><sub>책장을 누르면 내 스킬 / 플러그인 스킬과 한 줄 설명 — 줄을 누르면 <code>/스킬</code> 복사</sub></td>
-<td width="50%"><img src="docs/images/web-news.png" alt="사무실 소식 게시판"><br><sub>책장 밑 「사무실 소식」 게시판 — 접으면 3줄, 누르면 10줄</sub></td>
+<td width="50%"><img src="docs/images/web-news.png" alt="사무실 소식 게시판"><br><sub>책장 밑 「사무실 소식」 게시판 — 최근 3줄, 누르면 옆에 전체 목록</sub></td>
 </tr>
 <tr>
 <td width="50%"><img src="docs/images/cli-panel.png" alt="Claude Code 옆 패널"><br><sub>Claude Code 대화창 바로 옆 패널 — 「QA 3팀 × 3명」 시연 중, 처음엔 사용법 안내가 떠요</sub></td>

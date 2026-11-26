@@ -710,7 +710,7 @@
       hits.push({ key: s.key, x: s.sx, y: s.sy + 4, w: SLOT_W, h: ROW_H - 4 });
     }
     hits.push({ key: '__shelf', x: L.shelf.x, y: L.shelf.y, w: L.shelf.w, h: L.shelf.h + 20 }); // 책장 누르면 스킬 목록
-    hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 펼치기 · 접기
+    hits.push({ key: '__news', x: L.news.x, y: L.news.y, w: L.news.w, h: L.news.h + 14 }); // 게시판 누르면 옆에 소식 전체 목록 (책장처럼)
   }
   function roundRect(c, x, y, w, h, r) {
     c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
@@ -777,7 +777,7 @@
 
   const spark = [];
   // ---- 책장 밑 「사무실 소식」 게시판: 모두의 '한 일' 을 시간순으로 (접으면 3줄, 누르면 10줄) ----
-  let allEv = [], newsOpen = false, lastNews = '', seenNews = new Set();
+  let allEv = [], lastNews = '', seenNews = new Set(), newsDrop = false;
   function timeline() {
     const o = snap.office, ev = [];
     for (const [at2, x] of o.lead.recent || []) ev.push([at2, '팀장', x]);
@@ -785,22 +785,23 @@
     ev.sort((a, b) => b[0] - a[0]);
     allEv = ev;
     news();
+    if (sel === '__news') card();
   }
   function news() {
     const box = $('news');
     if (!box || !L || !L.news) return;
     const N = L.news, k = sd / dpr, x = (canvas.offsetLeft || 0) + N.x * k, y = (canvas.offsetTop || 0) + N.y * k;
-    const n = newsOpen ? 10 : 3;
-    const top = allEv.slice(0, n);
-    const key = newsOpen + '|' + top.map((e) => e[0] + e[2]).join('|');
-    box.className = newsOpen ? 'open' : '';
-    // 접으면 게시판 코르크판 안에, 펼치면 게시판 오른쪽 위에 맞춰 넓은 종이로
-    const w = newsOpen ? Math.max(320, N.w * k) : N.w * k;
-    box.style.width = w + 'px';
-    box.style.left = (newsOpen ? x + N.w * k - w : x) + 'px';
+    const top = allEv.slice(0, 3);
+    const on = sel === '__news';
+    const key = on + '|' + top.map((e) => e[0] + e[2]).join('|');
+    box.className = on ? 'on' : '';
+    box.style.width = N.w * k + 'px';
+    box.style.left = x + 'px';
     box.style.top = y + 'px';
-    box.style.height = newsOpen ? 'auto' : N.h * k + 'px';
-    $('newsTog').textContent = newsOpen ? '▴ 접기' : '▾ 10줄';
+    box.style.height = N.h * k + 'px';
+    // 게시판이 좁으면 머리 글을 줄인다 (오른쪽 밖으로 잘리지 않게)
+    const tight = N.w * k < 160;
+    $('newsTog').textContent = on ? (tight ? '◂' : '◂ 보는 중') : allEv.length > 3 ? (tight ? `▸ ${allEv.length}` : `▸ 전체 ${allEv.length}`) : '▸ 보기';
     if (key === lastNews) return;
     lastNews = key;
     $('newsList').innerHTML = top.length ? top.map((e) => {
@@ -809,7 +810,24 @@
     }).join('') : '<div>아직 소식이 없어요</div>';
     for (const e of allEv.slice(0, 30)) seenNews.add(e[0] + e[2]);
   }
-  $('news').addEventListener('click', () => { newsOpen = !newsOpen; news(); });
+    // 소식 카드: 모두의 '한 일' 전체를 최신 순으로 (열 때만 주르륵, 새 소식은 맨 위에 하나씩)
+  function newsCard() {
+    const list = allEv.slice(0, 60), now = Date.now(), wasDrop = newsDrop;
+    const rows = list.map((e, n) => {
+      const id = e[0] + e[2];
+      const first = seenCard.get(id);
+      const cls = newsDrop ? 'srow' : 'srow still' + (first === undefined || now - first < 4000 ? ' fresh' : '');
+      return `<div class="${cls}" style="--i:${Math.min(n, 20)}"><div class="sname"><b>${esc(e[1])}</b><span class="role">${hhmm(e[0])}</span></div><div class="snote">${esc(e[2])}</div></div>`;
+    });
+    for (const e of list) if (!seenCard.has(e[0] + e[2])) seenCard.set(e[0] + e[2], wasDrop ? 0 : now); // 새 소식은 4초 동안 노랗게
+    newsDrop = false;
+    return `<div class="who"><canvas id="cardFace" width="48" height="64"></canvas><div><h2>📋 사무실 소식</h2><div class="kind">팀장과 직원들이 한 일을 최신 순으로 모아 봐요</div></div></div>` +
+      `<h3>소식 ${allEv.length}개${allEv.length > list.length ? ` <span style="font-weight:400">— 최근 ${list.length}개만</span>` : ''}</h3>` +
+      (rows.length ? rows.join('') : '<div class="row">아직 소식이 없어요 — 일을 시키면 여기에 쌓여요</div>');
+  }
+  const seenCard = new Map();
+  const openNews = () => { const was = !!sel; sel = sel === '__news' ? null : '__news'; if (sel) newsDrop = true; card(); news(); if (was !== !!sel) refit(); };
+  $('news').addEventListener('click', () => openNews());
 
   // ---- 카드 (누른 직원 · 팀) ----
   // 책장 카드: 스킬 목록이 주르륵 (방금 쓴 책 → 내 스킬 → 플러그인은 더 보기)
@@ -901,6 +919,17 @@
       if (lastCardHtml !== HELP) { lastCardHtml = HELP; $('cardBody').innerHTML = HELP;
         const f = $('cardFace'), fc = f && f.getContext('2d'); if (fc) { fc.imageSmoothingEnabled = false; fc.drawImage(S.get('lead', { pose: 'thumb', expr: 'happy' }), 0, 0); } }
       el.hidden = false; return;
+    }
+    if (sel === '__news') {
+      const html = newsCard();
+      if (html !== lastCardHtml) {
+        lastCardHtml = html;
+        $('cardBody').innerHTML = html;
+        const f = $('cardFace'), fc = f && f.getContext('2d');
+        if (fc) { fc.imageSmoothingEnabled = false; fc.clearRect(0, 0, 48, 64); fc.drawImage(S.get('lead', { pose: 'idle', expr: 'happy' }), 0, 0); }
+      }
+      el.hidden = false;
+      return;
     }
     if (sel === '__shelf') {
       const html = shelfCard();
@@ -1010,14 +1039,15 @@
     const wx = ((ev.clientX - r.left) * dpr) / sd, wy = ((ev.clientY - r.top) * dpr) / sd;
     return hits.find((h) => wx >= h.x && wx < h.x + h.w && wy >= h.y && wy < h.y + h.h);
   }
-  const refit = () => { if (snap && snap.office) fit(); };
+  // 카드를 열고 닫으면 사무실 폭이 바뀐다: 창 크기 바꿀 때처럼 맞추자마자 바로 다시 그린다 (안 그리면 한 프레임 비어 깜빡임)
+  const refit = () => refitNow();
   canvas.addEventListener('click', (ev) => {
     const h = hitAt(ev);
-    if (h && h.key === '__news') { newsOpen = !newsOpen; news(); return; }
-    const was = !!sel; sel = h ? h.key : null; card(); if (was !== !!sel) refit();
+    if (h && h.key === '__news') { openNews(); return; }
+    const was = !!sel; sel = h ? h.key : null; card(); news(); if (was !== !!sel) refit();
   });
   canvas.addEventListener('mousemove', (ev) => { const h = hitAt(ev); if ((h && h.key) !== hover) { hover = h && h.key; canvas.classList.toggle('hand', !!h); } });
-  $('close').addEventListener('click', () => { sel = null; card(); refit(); });
+  $('close').addEventListener('click', () => { sel = null; card(); news(); refit(); });
   const open = (k) => () => { const was = !!sel; sel = sel === k ? null : k; card(); if (was !== !!sel) refit(); };
   $('report').addEventListener('click', open('__report'));
   $('roster').addEventListener('click', open('__roster'));
@@ -1041,7 +1071,7 @@
     if (firstTake && snap && snap.office) {
       firstTake = false;
       if (qs.get('sel')) sel = qs.get('sel');
-      if (qs.get('news') === 'open') newsOpen = true;
+      if (qs.get('news') === 'open') { sel = '__news'; newsDrop = true; }
     }
     $('empty').hidden = !!(snap && snap.office);
     if (snap && snap.office) {
@@ -1092,5 +1122,5 @@
   requestAnimationFrame(loop);
 
   // 시험용: 화면 없이 배치만 확인
-  window.__termimates = { layout: (W) => layout(W), take, motionOf: (s, now) => motionOf(snap.office, s, now), world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { newsOpen = open; lastNews = ''; news(); return $('newsList').innerHTML; } };
+  window.__termimates = { layout: (W) => layout(W), take, motionOf: (s, now) => motionOf(snap.office, s, now), world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
 })();
