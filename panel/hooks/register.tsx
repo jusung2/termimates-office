@@ -372,6 +372,22 @@ async function startWeb($: EngineInterface) {
   runServer($, dir)
   await writeSnap($)
 }
+/** 브라우저로 웹 사무실을 연다. 서버가 뜰 때까지 잠깐(최대 3초) 기다렸다가 연다 — 맥은 open, 리눅스는 xdg-open */
+async function openBrowser($: EngineInterface) {
+  const url = `http://127.0.0.1:${WEB_PORT}`
+  const ok = async (argv: string[]) => {
+    try {
+      return (await $.process.run(argv)).exitCode === 0
+    } catch {
+      return false
+    }
+  }
+  for (let i = 0; i < 10; i++) {
+    if (await ok(['/usr/bin/curl', '-s', '-o', '/dev/null', '-m', '1', url])) break
+    await $.clock.sleep(300)
+  }
+  if (!(await ok(['/usr/bin/open', url]))) await ok(['xdg-open', url])
+}
 
 /** 사장님 확인 기다림 시작 → 12초 넘게 그대로면 맥 알림 한 번 (다른 창에서 일하다 놓치지 않게) */
 async function waitFor($: EngineInterface, who: string, what: string, id?: string) {
@@ -560,7 +576,7 @@ export const register: Register = on => {
       if (!(up?.isPlaced && up.isShown)) await $.ui.open({ id: PANE, title: TITLE })
       return {}
     }
-    // /termimates 웹 = 브라우저 사무실 켜고 끄기 (프로젝트마다 기억). 브라우저는 사람이 직접 연다
+    // /termimates 웹 = 브라우저 사무실 켜고 끄기 (프로젝트마다 기억). 켤 때 브라우저도 연다 (세션 다시 열 때 저절로 켜질 땐 안 연다)
     if (words.includes('웹') || words.includes('web')) {
       if (webOn) {
         webOn = false
@@ -570,7 +586,8 @@ export const register: Register = on => {
       } else {
         await startWeb($).catch(() => undefined)
         await $.store.set(`web:${project}`, true).catch(() => undefined)
-        $.ui.toast(`웹 사무실: http://127.0.0.1:${WEB_PORT} — 브라우저에서 열어 보세요`)
+        $.ui.toast(`웹 사무실을 브라우저로 열어요: http://127.0.0.1:${WEB_PORT}`)
+        void openBrowser($).catch(() => undefined)
       }
       return {}
     }
