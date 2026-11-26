@@ -60,7 +60,7 @@ AI 가 지금 무엇을 하는지 **한눈에** 보이고, 허락이 필요하�
 </tr>
 <tr>
 <td width="50%"><img src="docs/images/web-news.png" alt="사무실 소식 게시판"><br><sub>책장 밑 「사무실 소식」 게시판 — 최근 3줄, 누르면 옆에 전체 목록</sub></td>
-<td width="50%"><img src="docs/images/cli-panel.png" alt="Claude Code 옆 패널"><br><sub>Claude Code 대화창 바로 옆 패널 — 「회원가입 화면 만들어줘」 시연 중, 처음엔 사용법 안내가 떠요</sub></td>
+<td width="50%"><img src="docs/images/cli-panel.png" alt="Claude Code 옆 패널"><br><sub>Claude Code 대화창 바로 옆 패널 — 「QA 1팀 · 2팀 · 3팀」 이 일하는 중, 처음엔 사용법 안내가 떠요</sub></td>
 <td width="50%">
 
 **패널에서 일이 끝나면**
