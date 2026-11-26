@@ -6,7 +6,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 
 import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
-import { HOLD, IDLE_DEMO, QA_STEPS, startDemo, STEPS } from './demo'
+import { HOLD, IDLE_DEMO, startDemo, STEPS } from './demo'
 import {
   addUsage, boardOf, EMPTY, familyOfW, jobOfW, log, onComplete, onPrompt, onRename, onSpawn, onStart, onTalk, onTodos, onToolEnd, onToolStart,
   onTurnStart, onWait, onWaitEnd, readerOf, reviewLine,
@@ -558,7 +558,7 @@ async function boot($: EngineInterface, cwd: string, fresh: boolean) {
     // immediate: Claude 가 일하는 중에 쳐도 기다리지 않고 바로 켜고 끈다 (글을 남기지 않아 대화에 섞이지 않음)
     await $.command.register({
       name: 'termimates', description: '사무실 창 열기 / 닫기 · 「도움말」 사용법 · 「웹」 브라우저 사무실 · 「시연」 가짜 장면 (토큰 0)',
-      argumentHint: '[도움말 | 웹 | 시연 | 시연 qa]', immediate: true,
+      argumentHint: '[도움말 | 웹 | 시연]', immediate: true,
     })
     if (fresh) await change($, onStart)
     await startPower($)
@@ -632,7 +632,7 @@ export const register: Register = on => {
   on('command.run', { command: 'termimates' }, async ($, e) => {
     wake($) // /reload-plugins 뒤 세션 시작 없이 올라왔으면 여기서 이어서 준비 (웹 스냅샷 · 타이머)
     const up = (await $.ui.panes()).find(p => p.id === PANE)
-    // /termimates 시연 = 회원가입 장면, /termimates 시연 qa = QA 3팀 × 3명 장면. 시연 중에 다시 치면 멈춤
+    // /termimates 시연 = 회원가입 장면 (다른 낱말은 무시). 시연 중에 다시 치면 멈춤
     const words = e.args.trim().toLowerCase().split(/\s+/)
     // /termimates 도움말 = 처음 쓰는 사람 안내 카드
     if (words.some(x => ['도움말', 'help', '가이드', '안내'].includes(x))) {
@@ -659,7 +659,7 @@ export const register: Register = on => {
       if ((await read($, demo)).running) await stopDemo($)
       else {
         if (!(up?.isPlaced && up.isShown)) await $.ui.open({ id: PANE, title: TITLE })
-        void runDemo($, words.includes('qa') ? QA_STEPS : STEPS)
+        void runDemo($, STEPS)
       }
       return {}
     }
