@@ -10,7 +10,7 @@ import { HOLD, IDLE_DEMO, startDemo, STEPS } from './demo'
 import {
   addUsage, boardOf, donePaper, EMPTY, familyOfW, isAsk, jobOfW, log, onComplete, onMissed, onPrompt, onRename, onSpawn, onStart, onTalk,
   onTodoMarks, onTodos, settleIdle, onToolEnd, onToolStart, onTurnStart, onWait, onWaitEnd, paperLine, PICK_MS, pickPaper, readerOf, reviewLine,
-  running, set, toShelf, unitOf, unitsOf, webSeats,
+  foldSteps, running, set, toShelf, unitOf, unitsOf, webSeats,
 } from './office'
 import {
   adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
@@ -70,6 +70,9 @@ let lastWidth = 0 // 애니메이션 타이머가 쓰는 패널 폭 (다시 그�
 let lastRows = 0 // 그림이 쓸 수 있는 줄 수 (패널 높이 - 위 글줄 - 카드 몫)
 let cardRows = 12 // 그림 아래 카드 몫 (그리기마다 이번 카드 높이로 다시 잼 — 처음 한 번만 이 값으로 어림)
 let calms = 0 // 안 붐빈 채 그린 횟수 (펼쳐 둔 카드는 이 수가 늘면 무효 — 그리기 중엔 상태를 못 써서 여기 센다)
+// 그림 몫 고정: 폭 · 높이 · 직원 수 · 자리 수 · 펼침/접힘이 그대로면 지난번 그림 몫 그대로 (누르기 · 고르기 · 글 길이로는 배율이 안 바뀜)
+// key = 그 조건들, rows = 그때 정한 그림 몫, gain = 그때 정한 「접으면 커지나」
+let stick: { key: string; rows: number; gain: boolean } | undefined
 
 /** 글 한 줄이 폭 안에서 몇 줄로 접히는지 */
 const wrapped = (text: string, width: number): number => Math.max(1, Math.ceil(dw(text) / Math.max(1, width)))
@@ -1205,9 +1208,17 @@ export const register: Register = on => {
     const headRows = 1 + (live ? 0 : 1) + 3 + (tired ? 1 : 0) + (waitRow ? 1 : 0) + (reportLine ? 1 : 0) + (paperRow ? 1 : 0) +
       wrapped(o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음', width) + wrapped(situation, width)
     const bodyRows = e.props.scroll?.bodyRows ?? 40
-    lastRows = Math.max(1, bodyRows - headRows - cardRows)
-    let L = sceneOf(o, width, lastRows, now)
     const units = unitsOf(o, now)
+    // 붐빔 · 펼쳐 둠 (아래 「붐빌 때 카드 접기」). 사장님이 펼쳐 둔 것(cardOpen)은 붐비는 동안 그대로, 한 번이라도 안 붐비면 무효
+    const crowdedNow = e.surface === 'terminal' && isCrowded(units)
+    if (e.surface === 'terminal' && !crowdedNow) calms++ // 다른 화면(웹 등)에서 그린 건 안 센다
+    const epoch = calms + 1
+    const open = crowdedNow && v.cardOpen === epoch
+    // 그림 몫을 다시 정하는 때: 폭 · 높이 · 직원 수 · 자리 수 · 붐빔 · 펼침이 바뀔 때만 (그 밖엔 지난번 몫 그대로)
+    const stickKey = [width, bodyRows, units.length, (foldSteps(units.filter(u => !u.boss))[0] ?? []).length, crowdedNow, open, live].join('|')
+    const stuck = e.surface === 'terminal' && stick?.key === stickKey ? stick : undefined
+    lastRows = stuck ? stuck.rows : Math.max(1, bodyRows - headRows - cardRows)
+    let L = sceneOf(o, width, lastRows, now)
     // 고를 수 있는 것: 팀장 · 자리 · 접은 자리(fold:…) · +n · 그림에 없어도 있는 자리(파트장 아래 직원)
     const sel = v.selected === 'main' || units.some(u => u.key === v.selected) || L.seats.some(s => s.pick === v.selected) ? v.selected : 'main'
     const selSeat = L.seats.find(s => s.pick === sel && (s.kind === 'fold' || s.kind === 'more'))
@@ -1354,19 +1365,29 @@ export const register: Register = on => {
     const folds = plan(units, width, Math.max(1, bodyRows - headRows - detailRows - extra)).spots.some(x => x.kind === 'fold' || x.kind === 'more')
     if (e.surface === 'terminal' && (isCrowded(units) || folds)) await buildCard(true)
     // 붐빌 때 카드 접기: 섬 후보이고, 카드를 「요약 한 줄 + 말 걸기 칸」 으로 접으면 그림 배율이 커질 때만.
-    // 접히는 건 팀장 카드뿐 (직원을 눌러 연 카드는 일부러 본 것이니 펼친 채, 머리줄 「▾」 를 누르면 팀장 카드로 돌아가 접힘).
-    // 사장님이 펼쳐 둔 것(cardOpen)은 붐비는 동안 그대로, 한 번이라도 안 붐비면 무효 (다음에 붐비면 다시 접혀서 시작)
-    const crowdedNow = e.surface === 'terminal' && isCrowded(units)
-    if (e.surface === 'terminal' && !crowdedNow) calms++ // 다른 화면(웹 등)에서 그린 건 안 센다
-    const epoch = calms + 1
+    // 직원 · 자리를 눌러도 펼치지 않고 접힌 한 줄이 그 직원 요약으로 바뀐다 (그림 크기 그대로). 그 줄을 누르면 펼침, 머리줄 「▾」 를 누르면 다시 접힘.
+    // 「접으면 커지나」 는 그림 몫을 정할 때만 잰다 (고른 카드 길이로 그리기마다 오락가락하지 않게)
     const FOLD_ROWS = 2 // 요약 한 줄 + 말 걸기 칸 (테두리 없이)
-    const foldGain = crowdedNow &&
+    const foldGain = stuck ? stuck.gain : crowdedNow &&
       plan(units, width, Math.max(1, bodyRows - headRows - FOLD_ROWS)).k > plan(units, width, Math.max(1, bodyRows - headRows - detailRows - extra)).k
-    const folded = foldGain && sel === 'main' && v.cardOpen !== epoch
-    const foldCard = () => update($, view, x => ({ ...(x ?? v), selected: 'main', cardOpen: undefined }))
-    const openCard = () => update($, view, x => ({ ...(x ?? v), selected: 'main', cardOpen: epoch }))
+    const folded = foldGain && !open
+    const foldCard = () => update($, view, x => ({ ...(x ?? v), cardOpen: undefined }))
+    const openCard = () => update($, view, x => ({ ...(x ?? v), cardOpen: epoch }))
     let summary = ''
-    if (folded) {
+    if (folded && sel !== 'main') {
+      // 「▸ QA 1팀 · 일하는 중 · 서류 2장 · 누르면 펼침」 (접은 자리 · +n 은 그 안 사람 수) — 좁으면 뒤에서부터 줄인다
+      const ws = selSeat ? units.filter(u => selSeat.ids?.some(id => u.list.some(w => w.id === id))).flatMap(u => u.list)
+        : o.workers.filter(w => unitOf(w) === sel)
+      const busy = ws.filter(w => w.ended === undefined).length
+      const last = [...ws].reverse()[0]
+      const state = busy ? `일하는 중${busy > 1 ? ` ${busy}명` : ''}` : last?.status === 'done' ? '보고 완료' : '퇴근'
+      const papers = o.handoffs.filter(h => h.at >= (o.promptAt ?? 0) && ws.some(w => w.id === h.from)).length
+      const name = selSeat ? (selSeat.kind === 'more' ? `접은 ${selSeat.name.slice(1)}` : selSeat.name) : sel
+      const tries = [`▸ ${name} · ${state}${papers ? ` · 서류 ${papers}장` : ''}`, `▸ ${name} · ${state}`, `▸ ${name}`]
+      summary = [tries[0]! + ' · 누르면 펼침', ...tries].find(x => dw(x) <= width) ?? fit(tries[tries.length - 1]!, width)
+      detail = []
+      detailRows = 1
+    } else if (folded) {
       // 「▸ 팀장 · 13% 쌩쌩 · 전기세 2.1억 · 맡긴 일 10건 (일하는 중 3)」 — 좁으면 뒤에서부터 줄인다
       const tok = sum(pw.byWorker.main)
       const busy = o.workers.filter(w => w.ended === undefined).length
@@ -1383,16 +1404,20 @@ export const register: Register = on => {
       detail = []
       detailRows = 1
     } else if (foldGain) await buildCard(true, '▾ ')
-    // 그림 몫을 이번 카드 높이로 정확히: 지난번과 다르면 다시 놓는다.
+    // 그림 몫을 이번 카드 높이로 정확히: 지난번과 다르면 다시 놓는다 — 그림 몫을 다시 정하는 때(stickKey 가 바뀔 때)만.
     // 카드가 안 보일 때(책장 · 안내 · 피로도 · 보고서)는 지난번 몫 그대로 (그림이 들썩이지 않게)
-    if (e.surface === 'terminal' && !(v.shelf || v.guide || v.tired || (v.report && rep))) {
+    const hidden = v.shelf || v.guide || v.tired || (v.report && rep)
+    if (e.surface === 'terminal' && !stuck && !hidden) {
       const rows = folded ? FOLD_ROWS : detailRows + extra
       if (rows !== cardRows) {
         cardRows = rows
         lastRows = Math.max(1, bodyRows - headRows - cardRows)
         L = sceneOf(o, width, lastRows, now)
       }
+      stick = { key: stickKey, rows: lastRows, gain: foldGain }
     }
+    // 그림 몫을 고정한 채 고른 카드가 남은 줄보다 길면 짧은 카드로 (그림은 그대로)
+    if (e.surface === 'terminal' && stuck && !folded && detailRows + extra > bodyRows - headRows - outOf(L).rows) await buildCard(true, foldGain ? '▾ ' : '')
     const K = L.k
     const OUT = outOf(L)
     const CWK = Math.round(CW * K) // 화면에서 자리 한 칸 폭
@@ -1653,8 +1678,8 @@ export const register: Register = on => {
           {folded ? <Button key="card-fold" plain onPress={openCard}><Text bold>{summary}</Text></Button> : null}
           {foldGain && !folded && detail.length ? [<Button key="card-unfold" plain onPress={foldCard}>{detail[0]!}</Button>, ...detail.slice(1)] : detail}
           {talk}
-          {renameBox}
-          {agentId ? (
+          {folded ? null : renameBox}
+          {agentId && !folded ? (
             <Box key="card-actions" columnGap={2}>
               <Button key="open-agent" onPress={async () => {
                 const r2 = await $.ui.view({ agentId })

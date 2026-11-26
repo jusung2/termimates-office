@@ -106,3 +106,31 @@ test('/termimates 시연: 검토하는 동안 QA 1팀 두 명이 한 자리(팀 
   expect((await ui.find({ type: 'Text', text: /팀원 2명 · 일하는 중 2명/ }))?.text).toBeTruthy()
   await ui.unmount()
 })
+
+test('/termimates 시연: 직원 · 퇴근한 자리를 누르기 전과 후 사무실 배율이 같다 (고른 카드 길이로 그림 크기가 안 바뀜)', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 25, 3, 0, 0) })
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [{ id: 'office', title: '사무실', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'termimates', args: '시연', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const sizes = [[113, 70], [116, 58], [116, 62], [120, 64], [126, 62]] as const
+  let t = 0
+  // 38 = QA 1팀 · 검토 중, 45 = QA 1팀 · QA 둘 다 퇴근 (예전엔 116 × 62 에서 팀장 1배 → QA 1팀 1.5배 → QA 퇴근 1배)
+  for (const at of [38, 45]) {
+    const want = STEPS.slice(0, at + 1).reduce((n, s) => n + s.wait, 0)
+    await clock.advance(want - t)
+    t = want
+    for (const [c, r] of sizes) {
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: c, scroll: { offset: 0, bodyRows: r } } })
+      const size = async () => { const p = (await ui.findAll({ type: 'Raster' }))[0]!.props; return `${p.columns}x${p.rows}` }
+      const before = await size()
+      for (const key of ['pick-QA 1팀', 'pick-QA', 'pick-리서처', 'pick-main']) {
+        await ui.press({ key })
+        expect(`${at} ${c}x${r} ${key} ${await size()}`).toBe(`${at} ${c}x${r} ${key} ${before}`)
+      }
+      await ui.unmount()
+    }
+  }
+})
