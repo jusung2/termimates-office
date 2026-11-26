@@ -1,7 +1,7 @@
 // 일어난 일 → 사무실 상태 (순수 함수). 실제 훅과 시연(/termimates 시연)이 같은 함수를 쓴다:
 // 시연 장면이 실제로 일할 때와 똑같이 보이도록.
 
-import type { Fill, Office, Power, Review, Tok, Worker } from '../types'
+import type { Fill, Office, Paper, Power, Review, TodoMark, Tok, Worker } from '../types'
 import { plus, sum } from './power'
 import { skillRole } from './skills'
 import {
@@ -452,3 +452,117 @@ export function boardOf(o: Office): BoardCol[] | undefined {
   }
   return cols
 }
+
+// -- 놓친 일 서류 -------------------------------------------------------------------------------
+// 짐작 없이 흔적 있는 것만: ① 차례가 끝났는데 그 사람이 적은 할 일 목록(TodoWrite · TaskCreate)에 안 끝난 줄
+// ② 사장님이 「했어?」 류로 물은 차례의 답에 「놓쳤 · 깜빡 · 빠뜨렸 · 아직 안 했 · 못 했」 ③ 직원이 중단됨.
+// 「오래 조용함」 · 번호 대조 같은 짐작은 안 한다. 시연 · 다시 보기는 이 함수들을 안 부른다 (실제 훅만).
+
+/** 팀장이 서류를 주우러 갔다 와서 확인하는 시간 (그 뒤 입력창에 문장). 걷기는 앞 PICK_WALK_MS, 나머지는 자리에서 읽기 */
+export const PICK_MS = 7000
+export const PICK_WALK_MS = 5600
+const MAX_PAPERS = 12
+
+const markState = (st: unknown): TodoMark['state'] => (st === 'completed' ? 'done' : st === 'in_progress' ? 'doing' : 'todo')
+
+/** 끝난 줄의 서류는 치운다 (나중에 그 줄이 완료되면 서류도 사라짐) */
+function sweep(o: Office): Office {
+  if (!o.papers?.length) return o
+  const done = new Set((o.marks ?? []).filter(m => m.state === 'done').map(m => m.key))
+  const papers = o.papers.filter(p => !p.ref || !done.has(p.ref))
+  return papers.length === o.papers.length ? o : { ...o, papers }
+}
+
+/** 할 일 도구 호출의 흔적 (who: 'main' 또는 직원 id). TodoWrite = 그 사람 목록 통째로, TaskCreate = 결과의 id 로 한 줄,
+ *  TaskUpdate = id 로 상태 바꿈 (deleted 면 그 줄 · 서류 없앰). result 는 도구가 돌려준 것 (TaskCreate 의 task.id) */
+export function onTodoMarks(o: Office, who: string, tool: string, input: Record<string, unknown>, result?: unknown): Office {
+  let marks = o.marks ?? []
+  if (tool === 'TodoWrite' && Array.isArray(input.todos)) {
+    const mine = (input.todos as Record<string, unknown>[]).slice(0, 30).map((t): TodoMark => {
+      const text = clip(String(t.content ?? t.subject ?? ''), 60)
+      return { key: `todo:${who}:${text}`, who, text, state: markState(t.status) }
+    }).filter(m => m.text)
+    marks = [...marks.filter(m => !(m.who === who && m.key.startsWith('todo:'))), ...mine]
+  } else if (tool === 'TaskCreate') {
+    const id = (result as { task?: { id?: unknown } } | undefined)?.task?.id
+    const text = clip(String(input.subject ?? ''), 60)
+    if (id === undefined || !text) return o
+    marks = [...marks.filter(m => m.key !== `task:${id}`), { key: `task:${id}`, who, text, state: 'todo' }]
+  } else if (tool === 'TaskUpdate' && input.taskId !== undefined) {
+    const key = `task:${String(input.taskId)}`
+    if (input.status === 'deleted') {
+      return { ...o, marks: marks.filter(m => m.key !== key), papers: (o.papers ?? []).filter(p => p.ref !== key) }
+    }
+    marks = marks.map(m => (m.key !== key ? m : {
+      ...m, state: input.status ? markState(input.status) : m.state, text: typeof input.subject === 'string' ? clip(input.subject, 60) : m.text,
+    }))
+  } else return o
+  return sweep({ ...o, marks: marks.slice(-60) })
+}
+
+/** 「했어?」 · 「확인했어?」 · 「다 됐어?」 류 물음 */
+export const isAsk = (text: string): boolean =>
+  /(했어|했나요|했니|했냐|했지|했어요|했습니까|됐어|됐나요|됐니|봤어|봤나요|돌렸어|돌렸나요|넣었어|고쳤어|끝났어|끝냈어)\s*[?？]|(했|됐|봤|돌렸|넣었|고쳤|끝냈)(는지|나)\s*(확인|말해|알려)|\b(did you|have you)\b.*\?/i.test(text)
+
+const MISS = /놓쳤|놓친\s*(게|것|일|부분)\s*(있|이 있)|깜빡|빠뜨렸|빠트렸|빼먹었|누락(했|됐|되었)|아직\s*안\s*했|아직\s*못\s*했|못\s*했(어|습니다|네|어요)|못했(어|습니다|네|어요)/
+const NOT_MISSED = /(놓친|빠뜨린|빠트린|빼먹은|누락된|못 한|못한)\s*(건|게|것|일|부분)[은는이가]?\s*없/
+
+/** 답에서 놓친 일을 말한 문장 하나 (짧게). 없으면 undefined. 「놓친 건 없어요」 는 아님 */
+export function missedIn(answer: string): string | undefined {
+  for (const raw of answer.split(/(?<=[.!?。])\s+|\n+/)) {
+    const line = raw.replace(/^[\s>*\-•·\d.)]+/, '').trim()
+    if (!line || !MISS.test(line) || NOT_MISSED.test(line)) continue
+    // 「죄송해요, 」 같은 앞말은 빼고 짧게
+    return clip(line.replace(/^(죄송(해요|합니다)|미안(해요|합니다)|앗|아|네|사실)[,.!\s]*/, ''), 48)
+  }
+  return undefined
+}
+
+const WHY: Record<Paper['why'], string> = { todo: '할 일 목록에 안 끝난 줄', said: '답에 「놓쳤다」', abort: '중단됨' }
+
+/** 서류 한 장 떨어뜨림 (같은 줄의 안 주운 서류가 있으면 또 안 만든다). 사무실 소식(팀장 한 일)에도 한 줄 */
+function drop(o: Office, now: number, p: Omit<Paper, 'id' | 'at'>): Office {
+  if (p.ref && (o.papers ?? []).some(x => x.ref === p.ref && !x.picked)) return o
+  if (!p.ref && (o.papers ?? []).some(x => !x.picked && x.who === p.who && x.why === p.why && x.text === p.text)) return o
+  const id = `p${now.toString(36)}${(o.papers ?? []).length}`
+  const paper: Paper = { id, at: now, ...p }
+  const where = p.who === 'main' ? '팀장 자리' : `${p.unit} 자리`
+  return { ...o, papers: [...(o.papers ?? []), paper].slice(-MAX_PAPERS),
+    lead: log(o.lead, now, `📄 놓친 일 서류: 「${clip(p.text, 40)}」 — ${where} (${WHY[p.why]})`) }
+}
+
+/** 차례가 끝남 (id 없으면 팀장): ① 그 사람 할 일 목록의 안 끝난 줄 ② (팀장) 물음의 답에 「깜빡」 류 ③ 직원 중단 → 서류.
+ *  onComplete 다음에 부른다 (실제 훅만 — 시연은 안 부름) */
+export function onMissed(o: Office, id: string | undefined, answer: string, aborted: boolean, now: number): Office {
+  const who = id ?? 'main'
+  const w = id ? o.workers.find(x => x.id === id) : undefined
+  if (id && !w) return o
+  const unit = w ? unitOf(w) : '팀장'
+  let out = o
+  for (const m of o.marks ?? []) if (m.who === who && m.state !== 'done') out = drop(out, now, { who, unit, why: 'todo', text: m.text, ref: m.key })
+  if (!id && o.asked) {
+    const said = missedIn(answer)
+    if (said) out = drop(out, now, { who, unit, why: 'said', text: said })
+    out = { ...out, asked: false }
+  }
+  if (w && aborted && !w.teammate) out = drop(out, now, { who, unit, why: 'abort', text: clip(w.task || unitOf(w), 48) })
+  return out
+}
+
+/** 팀장이 서류를 주우러 감 (이미 주우러 갔으면 그대로) */
+export function pickPaper(o: Office, id: string, now: number): Office {
+  const p = (o.papers ?? []).find(x => x.id === id)
+  if (!p || p.picked !== undefined) return o
+  return { ...o, papers: (o.papers ?? []).map(x => (x.id === id ? { ...x, picked: now } : x)),
+    lead: log(set(o.lead, 'work', '놓친 일 서류 주우러 가는 중', now, 'Read', '놓친 일 서류'), now, `📄 놓친 일 서류 주움: 「${clip(p.text, 40)}」`) }
+}
+
+/** 다시 확인을 넘겼으면 서류를 치운다. back = 못 넘겨서 바닥에 도로 둠 */
+export function donePaper(o: Office, id: string, now: number, back = false): Office {
+  const papers = back ? (o.papers ?? []).map(x => (x.id === id ? { ...x, picked: undefined } : x)) : (o.papers ?? []).filter(x => x.id !== id)
+  const lead = o.lead.status === 'work' && o.lead.target === '놓친 일 서류' ? set(o.lead, 'idle', back ? '서류를 도로 놓음' : '놓친 일 다시 확인 문장을 입력창에 넣음', now) : o.lead
+  return { ...o, papers, lead }
+}
+
+/** 입력창에 넣을 문장 */
+export const paperLine = (p: Pick<Paper, 'text'>): string => `놓친 일 다시 확인: ${p.text}`

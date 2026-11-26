@@ -1,5 +1,6 @@
 // 미리보기: 실제 scene.ts 의 plan() → layout() → draw() → zoom() 길 그대로 그린 픽셀을 PNG 로 (칸 하나 = 가로 1 · 세로 2 픽셀, 4배 확대)
-// 쓰는 법: node scripts/panel-preview.mjs <출력.png> [칸=113] [그림 줄 수=40]   (최종 확인은 진짜 터미널로)
+// 쓰는 법: node scripts/panel-preview.mjs <출력.png> [칸=113] [그림 줄 수=40] [서류]   (최종 확인은 진짜 터미널로)
+// 「서류」 를 붙이면 놓친 일 서류 장면: 바닥에 서류 둘 + 팀장이 하나를 주우러 가는 중 (두 번째 그림)
 import { writeFileSync } from 'node:fs'
 import { register } from 'node:module'
 import { deflateSync } from 'node:zlib'
@@ -8,7 +9,7 @@ register('data:text/javascript,' + encodeURIComponent(`export async function res
   try { return await next(s, c) } catch (e) { if (s.startsWith('.') && !/\\.[cm]?[jt]sx?$/.test(s)) return next(s + '.ts', c); throw e } }`))
 const scene = await import(new URL('../panel/hooks/scene.ts', import.meta.url).href)
 const office = await import(new URL('../panel/hooks/office.ts', import.meta.url).href)
-const [out = 'panel-preview.png', width = '113', rows = '40'] = process.argv.slice(2)
+const [out = 'panel-preview.png', width = '113', rows = '40', extra = ''] = process.argv.slice(2)
 const now = 1_800_000_000_000
 // 예시: QA 3팀 (앞 팀원은 끝) + 리서처 둘 나란히 + 디자이너 + 개발 파트장과 그 아래 둘
 let o = office.onPrompt(office.EMPTY, '회원가입 만들어줘', now - 90000)
@@ -19,6 +20,15 @@ sp('x1', 'Explore', '조사 1'); sp('x2', 'Explore', '조사 2'); work('x1', 'Gr
 sp('d1', 'designer', '시안'); work('d1')
 sp('L1', 'executor', '개발 이끌기'); sp('k1', 'executor', '조각 1', { parentAgentId: 'L1' }); sp('k2', 'executor', '조각 2', { parentAgentId: 'L1' })
 for (const id of ['L1', 'k1', 'k2']) work(id)
+if (extra === '서류') {
+  // 놓친 일: 디자이너가 적어 둔 할 일 한 줄이 안 끝남 · 팀장 목록에 안 끝난 줄 · 리서처 x2 중단 → 각 자리 근처 바닥에
+  o = office.onTodoMarks(o, 'd1', 'TodoWrite', { todos: [{ content: '아이콘 색 맞추기', status: 'pending' }] })
+  o = office.onMissed(o, 'd1', '', false, now - 5000)
+  o = office.onMissed(office.onComplete(o, 'x2', '', true, now - 4000), 'x2', '', true, now - 4000)
+  o = office.onTodoMarks(o, 'main', 'TodoWrite', { todos: [{ content: 'README 고치기', status: 'in_progress' }] })
+  o = office.onMissed(o, undefined, '', false, now - 3000)
+  o = office.pickPaper(o, o.papers.find((p) => p.who === 'main').id, now - 600) // 팀장이 하나를 주우러 가는 중 (두 번째 그림에서 걷는 모습)
+}
 const frames = []
 for (const [cols, budget, dt] of [[+width, +rows, 0], [+width, +rows, 700], [Math.floor(+width / 2), +rows, 0], [+width, 70, 0]]) {
   const units = office.unitsOf(o, now + dt)

@@ -51,6 +51,19 @@ export type Office = {
   todos?: { text: string; state: 'todo' | 'doing' | 'done' }[] // 팀장의 할 일 목록 (웹 화이트보드)
   waiting?: { at: number; who: string; what: string; id?: string } // 사장님 확인(허락 · 질문)을 기다리는 중 (id = 그 호출)
   reviews?: Review[] // 서로 검사하기 결과 (최근 20개)
+  marks?: TodoMark[] // 할 일 흔적 (TodoWrite · TaskCreate · TaskUpdate 호출에서만). 놓친 일 서류를 가리는 데 쓴다
+  papers?: Paper[] // 놓친 일 서류 (바닥에 떨어진 것)
+  asked?: boolean // 이번 사장님 지시가 「했어?」 · 「확인했어?」 같은 물음인가 (팀장 답에서 「깜빡」 같은 말을 찾는다)
+}
+
+/** 할 일 한 줄의 흔적. key: TodoWrite 는 「todo:<누구>:<내용>」, TaskCreate 는 「task:<id>」. who = 적은 사람 ('main' 또는 직원 id) */
+export type TodoMark = { key: string; who: string; text: string; state: 'todo' | 'doing' | 'done' }
+
+/** 놓친 일 서류: 흔적 있는 것만 (todo = 차례가 끝났는데 할 일 목록에 안 끝난 줄 · said = 「했어?」 물음의 답에 「깜빡」 류 · abort = 직원 중단).
+ *  who · unit = 그 일을 맡았던 사람 · 자리 (그 자리 근처 바닥에 떨어진다). ref = 할 일 흔적 key (그 줄이 끝나면 서류도 사라짐).
+ *  picked = 팀장이 주우러 간 때 (줍고 돌아와 확인한 뒤 입력창에 「놓친 일 다시 확인: …」, 그다음 없어짐) */
+export type Paper = {
+  id: string; at: number; who: string; unit: string; why: 'todo' | 'said' | 'abort'; text: string; ref?: string; picked?: number
 }
 
 export type View = {
