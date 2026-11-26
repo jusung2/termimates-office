@@ -131,6 +131,18 @@ els.stage.clientWidth = 1800; els.stage.clientHeight = 1400
 api.take(snap); api.take(layerSnap)
 for (let t = 0; t < 500; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
 if (!calls.said.has('같은 일 ×4') || [...calls.said].some((x) => x.includes('병렬'))) { console.error('청록 깔개 위 「같은 일 ×4」 글이 없음'); process.exit(1) }
+// 「같은 일 ×n」 띠는 말풍선(모서리 · 그림자 · 꼬리)과 1픽셀도 안 겹친다 (여러 창 크기)
+for (const [cw, ch] of [[1800, 1400], [1400, 900], [1100, 700], [900, 1400]]) {
+  els.stage.clientWidth = cw; els.stage.clientHeight = ch
+  api.take(snap); api.take(layerSnap)
+  for (let t = 0; t < 200; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
+  const bx = api.boxes()
+  if (!bx.tags.length && cw === 1800) { console.error('「같은 일」 띠가 안 그려짐', cw); process.exit(1) }
+  for (const t of bx.tags) for (const b of bx.bubbles) if (hitBox(t, b)) { console.error('「같은 일」 띠가 말풍선과 겹침', cw, ch, t, b); process.exit(1) }
+}
+els.stage.clientWidth = 1800; els.stage.clientHeight = 1400
+api.take(snap); api.take(layerSnap)
+for (let t = 0; t < 200; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
 if (!api.select('리서처').includes('같은 일을 나눠서 동시에 하는 직원들이에요 (4명)')) { console.error('청록 깔개 자리 카드에 뜻 한 줄이 없음'); process.exit(1) }
 els.stage.clientWidth = 1400; els.stage.clientHeight = 760
 if (!api.select('개발자').includes('파트원 3명') || !api.select('개발자').includes('⟳ 3번째')) { console.error('파트장 카드 이상', api.select('개발자').replace(/<[^>]+>/g, ' ').slice(0, 300)); process.exit(1) }
@@ -142,6 +154,19 @@ for (let t = 0; t < 1000; t += 50) { now += 50; const fs = rafs; rafs = []; fs.f
 if (parseFloat(els.office.style.height) > 520) { console.error('세로 스크롤이 생김', els.office.style.height); process.exit(1) }
 const foldCard = api.select('fold:QA') || api.select('__more')
 if (!/접/.test(foldCard) || !/QA \d팀/.test(foldCard)) { console.error('접은 자리 카드 이상', foldCard.slice(0, 200)); process.exit(1) }
+// 자리 이어받기: 나가던 개발자는 새 개발자가 그 자리에 앉아도 끝까지 걸어 나간다 (office.ts 가 적어 준 leaving)
+{
+  let g = OF.onPrompt(OF.EMPTY, '고쳐 줘', now - 20000)
+  g = OF.onSpawn(g, { id: 'ga', type: 'executor', description: '구현', background: true }, now - 15000)
+  g = OF.onComplete(g, 'ga', '완료', false, now - 3000)
+  g = OF.onSpawn(g, { id: 'gb', type: 'executor', description: '구현 2', background: true }, now - 1000)
+  api.take({ ...snap, office: g, ...OF.webSeats(g, now), board: null })
+  const seat = api.layout(1000).seats.find((x) => x.key === '개발자')
+  if (!seat || seat.worker.id !== 'gb' || !seat.leaving.some((w) => w.id === 'ga')) { console.error('자리 이어받기: 나가는 앞사람이 없음', seat && seat.leaving); process.exit(1) }
+  const m = api.motionOf(seat, now, seat.leaving[0])
+  if (!m.m || m.gone) { console.error('자리 이어받기: 앞사람이 안 걷고 사라짐', m); process.exit(1) }
+  for (let t = 0; t < 400; t += 50) { now += 50; const fs = rafs; rafs = []; fs.forEach((f) => f(now)) }
+}
 els.stage.clientWidth = 1400; els.stage.clientHeight = 760
 api.take(snap)
 const L = api.layout(1000)

@@ -63,3 +63,45 @@ test('/reload-plugins 뒤 (세션 시작 없이 모듈만 새로): 웹을 켜 �
   expect(runs.some(a => a[0] === '/usr/bin/open' || a[0] === 'xdg-open')).toBe(false) // 브라우저는 사람이 켤 때만
   expect(opened).toBe(0) // 창 · 안내도 다시 안 연다
 })
+
+test('/resume (같은 프로세스에서 세션만 바뀜, 세션 시작 없음): 타이머 · 웹 스냅샷이 새 세션 id 로 이어지고 팀장이 다시 출근', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 10, 26, 3, 0, 0) })
+  const store: Record<string, unknown> = { welcomed: true, 'web:/work/a': true }
+  const files: Record<string, string> = {}
+  let id = 'sess-1'
+  on('command.register', () => ({ value: { command: 'termimates' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('session.id', () => ({ value: id }))
+  on('store.get', (_, e) => ({ value: store[e.key] }))
+  on('store.set', (_, e) => { store[e.key] = e.value; return { value: undefined } })
+  on('store.keys', () => ({ value: Object.keys(store) }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/Users/me\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  let writes2 = 0
+  on('fs.write', (_, e) => { files[e.path] = e.text; if (e.path.endsWith('sess-2.json')) writes2++; return { value: undefined } })
+  on('ui.panes', () => ({ value: [] }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }))
+  await $.session.start({ cwd: '/work/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(400)
+  expect(files['/Users/me/.termimates/panel/sess-1.json']).toBeTruthy()
+  await $.session.end({ reason: 'resume', sessionId: 'sess-1', resume: { id: 'sess-1' } as never })
+  id = 'sess-2'
+  await clock.advance(400)
+  expect(JSON.parse(files['/Users/me/.termimates/panel/sess-1.json']!).office.lead.status).toBe('off') // 끝난 세션: 퇴근
+  await $.prompt.submit({ text: '이어서 하자', wait: false, origin: { kind: 'composer' } })
+  await clock.advance(400)
+  const snap = JSON.parse(files['/Users/me/.termimates/panel/sess-2.json'] ?? 'null')
+  expect(snap?.session).toBe('sess-2') // 새 세션 id 로 이어 씀
+  expect(snap.office.prompt).toBe('이어서 하자')
+  // 타이머(0.3초 스냅샷)는 멈추지 않았다: 훅은 스냅샷을 직접 안 쓰니, 새 직원이 파일에 보이면 타이머가 쓴 것
+  const before = writes2
+  await $.agent.spawn({
+    tool_use_id: 't1', prompt: '', description: '로그인 고치기', subagentType: 'executor',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false,
+  })
+  await clock.advance(400)
+  expect(writes2).toBeGreaterThan(before)
+  expect(JSON.parse(files['/Users/me/.termimates/panel/sess-2.json']!).units.map((u: { key: string }) => u.key)).toEqual(['개발자'])
+  expect(snap.office.lead.recent.some(([, t]: [number, string]) => t === '퇴근')).toBe(true)
+})

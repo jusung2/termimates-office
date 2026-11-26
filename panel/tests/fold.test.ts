@@ -4,7 +4,7 @@ import { STEPS } from '../hooks/demo'
 
 import { boardOf, EMPTY, familyOfW, fold, foldSteps, LINGER_MS, onComplete, webSeats, onPrompt, onSpawn, onToolStart, unitOf, unitsOf } from '../hooks/office'
 import type { Spawn } from '../hooks/office'
-import { draw, layout, outOf, perRowOf, plan, xOf, zoom } from '../hooks/scene'
+import { draw, isMoving, layout, leavingOf, outOf, perRowOf, plan, xOf, zoom } from '../hooks/scene'
 import { jobOf } from '../hooks/words'
 import type { Office } from '../types'
 
@@ -313,4 +313,38 @@ test('청록 깔개(나란히 자리)를 누르면 카드 맨 위에 「같은 �
   expect((await ui.find({ type: 'Text', text: /같은 일을 나눠서 동시에 하는 직원들이에요 \(3명\)/ }))?.text).toBeTruthy()
   expect((await ui.find({ type: 'Text', text: /같은 일 직원 3명/ }))?.text).toBeTruthy() // 목록 · 상태
   await ui.unmount()
+})
+
+test('자리 이어받기: 나가던 직원은 새 직원이 그 자리에 앉아도 끝까지 걸어 나간다 (한 자리 · 나란히 자리 둘 다)', () => {
+  // 한 자리: 개발자 a 가 보고하고 나가는 중(끝난 지 3초)에 같은 자리 개발자 b 출근
+  let o = build([['a', 'executor', '구현']])
+  o = onComplete(o, 'a', '완료', false, 5000)
+  o = onSpawn(o, sp('b', 'executor', '구현 2'), 8000)
+  const at = (now: number) => {
+    const units = unitsOf(o, now)
+    const L = layout(o, 120, unitOf, familyOfW, { spots: plan(units, 120, 60).spots, units })
+    const seat = L.seats.find(x => x.key === '개발자')!
+    return { seat, walk: leavingOf(o, L, seat, now) }
+  }
+  expect(at(9000).seat.worker?.id).toBe('b') // 자리는 새 사람 몫
+  expect(at(9000).walk.map(x => x.w.id)).toEqual(['a']) // 앞사람은 따로 걷는 중 (안 사라짐)
+  expect(at(9000).walk[0]!.m.p).toBeGreaterThan(0) // 서류 들고 팀장에게 가는 길
+  expect(at(5000 + 6000 + 1500 + 1000).walk[0]!.m.pts.at(-1)!.x).toBeLessThan(0) // 그다음 문(왼쪽 밖)으로
+  expect(at(5000 + LINGER_MS + 1).walk).toEqual([]) // 다 나간 뒤엔 없음
+  expect(isMoving(o, 9000)).toBe(true)
+
+  // 나란히 자리: 리서처 x1 · x2 동시에, x1 이 끝나고 x3 이 그 자리를 이어받아도 x1 은 그 자리에서 걸어 나간다
+  let p = build([['x1', 'Explore', '조사 1'], ['x2', 'Explore', '조사 2']])
+  p = onComplete(p, 'x1', '찾음', false, 5000)
+  p = onSpawn(p, sp('x3', 'Explore', '조사 3'), 7000)
+  const units = unitsOf(p, 8000)
+  const steps = foldSteps(units)
+  expect(steps[0]!.find(x => x.who === 'x3')?.leaving).toEqual(['x1'])
+  const L = layout(p, 120, unitOf, familyOfW, { spots: steps[0]!, units })
+  const twin = L.seats.find(x => x.worker?.id === 'x3')!
+  expect(leavingOf(p, L, twin, 8000).map(x => x.w.id)).toEqual(['x1'])
+  // 웹 스냅샷도 같은 몫 (office.js 가 sp.leaving 으로 따로 걷게 그린다)
+  expect(webSeats(p, 8000).steps.main[0]!.find(x => x.who === 'x3')?.leaving).toEqual(['x1'])
+  // 접어 한 자리로 보여도 나가는 사람은 남는다
+  expect(webSeats(p, 8000).steps.main[1]!.find(x => x.key === '리서처')?.leaving).toEqual(['x1'])
 })

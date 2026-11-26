@@ -180,6 +180,7 @@ export type Seat = {
   ids?: string[] // 이 자리에 든 직원 id 들 (일 맡길 때 서류가 날아갈 자리 찾기)
   kids?: number // 파트장이면 그 아래 사람 수 (터미널은 층을 안 그리고 「+3」 만)
   loop?: number // ⟳ 반복 횟수
+  leaving?: Worker[] // 이 자리에서 막 나가는 중인 사람 (새 사람이 자리를 이어받아도 문까지 끝까지 걷는다)
 }
 
 export type Layout = {
@@ -247,7 +248,8 @@ export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale }
 function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) => string): Omit<Seat, 'col' | 'row'> {
   const us = sp.units.map(k => units.find(u => u.key === k)).filter((u): u is UnitInfo => !!u)
   const list = us.flatMap(u => u.list)
-  const base = { key: sp.key, pick: sp.pick, kind: sp.kind, ids: list.map(w => w.id), name: sp.label }
+  const leaving = (sp.leaving ?? []).map(id => o.workers.find(w => w.id === id)).filter((w): w is Worker => !!w)
+  const base = { key: sp.key, pick: sp.pick, kind: sp.kind, ids: list.map(w => w.id), name: sp.label, ...(leaving.length ? { leaving } : {}) }
   if (sp.kind === 'twin') {
     const w = o.workers.find(x => x.id === sp.who)
     // 파트장 「+n」 · ⟳n 은 묶음 첫 자리에만
@@ -542,9 +544,9 @@ function toHall(s: Seat, x: number): Pt[] {
 
 type Motion = { pts: Pt[]; p: number; carry?: 'paper' | 'book'; book?: string; give?: number }
 
-/** 지금 이 자리 사람이 걷는 중이면 어디쯤인지. gone = 퇴근해서 자리에 없음 */
-function motionOf(o: Office, L: Layout, s: Seat, now: number): { m?: Motion; gone: boolean } {
-  const w = s.worker
+/** 지금 이 자리 사람이 걷는 중이면 어디쯤인지. gone = 퇴근해서 자리에 없음. who 를 주면 그 사람으로 (자리에서 나가는 앞사람) */
+function motionOf(o: Office, L: Layout, s: Seat, now: number, who?: Worker): { m?: Motion; gone: boolean } {
+  const w = who ?? s.worker
   if (!w) return { gone: false }
   const lead = L.seats[0]!
   const id = s.key === 'main' ? 'main' : w.id
@@ -565,6 +567,7 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number): { m?: Motion; gon
     if (lAge >= LEAVE_MS) return { gone: true }
     if (lAge >= 0) return { m: { pts: toHall(s, DOOR_X), p: ease(lAge / LEAVE_MS) }, gone: false }
   }
+  if (who) return { gone: false } // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
   // 3) 책장: 스킬을 쓰면 책장에 가서 그 책을 꺼내 와 읽는다
   const sh = [...(o.shelf ?? [])].reverse().find(x => x.who === id)
   const sAge = sh ? now - sh.at : -1
@@ -581,6 +584,18 @@ function motionOf(o: Office, L: Layout, s: Seat, now: number): { m?: Motion; gon
     if (aAge >= 0 && aAge < ARRIVE_MS) return { m: { pts: toHall(s, DOOR_X), p: 1 - ease(aAge / ARRIVE_MS) }, gone: false }
   }
   return { gone: false }
+}
+
+/** 자리를 이어받힌 앞사람들의 걸음: 서류 보고 → 문으로 퇴근을 끝까지 (퇴근 전 잠깐 서 있는 동안은 자리 옆에 선 채로) */
+export function leavingOf(o: Office, L: Layout, s: Seat, now: number): { w: Worker; m: Motion }[] {
+  const out: { w: Worker; m: Motion }[] = []
+  for (const w of s.leaving ?? []) {
+    if (w.ended === undefined) continue
+    const r = motionOf(o, L, s, now, w)
+    if (r.gone) continue
+    out.push({ w, m: r.m ?? { pts: toHall(s, DOOR_X), p: 0 } })
+  }
+  return out
 }
 
 /** 퇴근해서 자리에 없는가 (이름표 · 말풍선을 끄려고) */
@@ -665,6 +680,7 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
     things.push({ foot: deskBottom(s), paint: () => seatUnit(b, s, now, frame, present, reading, fills[s.key]) })
     const m = moves.get(s.key)
     if (m) walker(m, s.role, s.pick ?? s.key)
+    for (const x of leavingOf(o, L, s, now)) walker(x.m, s.role, s.pick ?? s.key)
   }
   things.push({ foot: aisleFoot(0) + 1, paint: () => door(b) }) // 문은 복도 사람보다 앞
   things.sort((a, c) => a.foot - c.foot)

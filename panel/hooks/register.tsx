@@ -595,8 +595,22 @@ async function boot($: EngineInterface, cwd: string, fresh: boolean) {
   }
 }
 
-/** 세션 시작 없이 모듈만 새로 올라왔으면(/reload-plugins) 처음 오는 이벤트에서 한 번 이어서 준비한다. 기다리지 않음 */
+let rejoin = false // /resume · /clear: 같은 프로세스 · 같은 모듈에서 세션만 바뀜 (세션 시작 이벤트가 안 옴)
+
+/** 세션 시작 없이 모듈만 새로 올라왔으면(/reload-plugins) 처음 오는 이벤트에서 한 번 이어서 준비한다. 기다리지 않음.
+ *  /resume · /clear 뒤엔 모듈이 그대로라 타이머(clock.every)는 안 멈춘다 — 대신 세션 id 가 바뀌고 세션 시작이 안 오니,
+ *  처음 오는 이벤트에서 새 세션 id 로 스냅샷 · 전기세 키를 옮기고 퇴근한 팀장을 다시 출근시킨다 */
 function wake($: EngineInterface) {
+  if (rejoin && booted) {
+    rejoin = false
+    void (async () => {
+      await change($, onStart)
+      await startPower($) // sid 를 새 세션 id 로
+      lastSnap = ''
+      await writeSnap($)
+    })().catch(() => undefined)
+    return
+  }
   if (booted) return
   void $.session.cwd().then(cwd => boot($, cwd, false)).catch(() => undefined)
 }
@@ -850,6 +864,8 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
+    // /resume · /clear: 프로세스는 다른 세션 id 로 이어 간다 (세션 시작 없음) → 다음 이벤트에서 wake 가 이어 준비
+    if (e.reason === 'resume' || e.reason === 'clear') rejoin = true
     await closeJob($).catch(() => undefined)
     await change($, (o, now) => ({
       ...o,
