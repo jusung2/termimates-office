@@ -81,7 +81,7 @@ function sceneOf(o: Office, width: number, rows: number, now: number, keep = fal
   const units = unitsOf(o, now)
   const p = keep && lastPlan ? lastPlan : plan(units, width, rows)
   if (!keep) lastPlan = p
-  return layout(o, width, unitOf, familyOfW, { spots: p.spots, units, k: p.k })
+  return layout(o, width, unitOf, familyOfW, { spots: p.spots, units, k: p.k, isles: p.isles })
 }
 
 /** 그림 한 장 (2배면 늘려서) */
@@ -1442,9 +1442,25 @@ export const register: Register = on => {
             }
             return out
           })()}
+          {(L.isles ?? []).filter(g => g.keys.length >= 2 && !g.other).map(g => {
+            // 역할별 섬: 자리마다 이름표 대신 섬 아래 하나 (「디자이너 ×3」, 한 줄보다 긴 섬의 이어진 조각은 이름만)
+            const left = xOf(L, g.col), room = xOf(L, g.col + g.w) - left - 2
+            const text = tagText({ name: g.name, count: g.first ? g.people : 1 }, room)
+            // 누를 때마다 섬 안 자리를 차례로 고른다 (자리마다 이름표가 없으니)
+            const picks = [...new Set(L.seats.filter(x => g.keys.includes(x.key)).map(x => x.pick ?? x.key))]
+            const pk = picks[(picks.indexOf(sel) + 1) % picks.length] ?? 'main'
+            return (
+              <Box key={'isle-' + g.keys[0]} position="absolute" top={Math.ceil((g.row + TAG_ROW) * K)} left={left + Math.max(1, Math.floor((room + 2 - dw(text)) / 2))}>
+                <Button key={'isle-btn-' + g.keys[0]} plain onPress={pick(pk)}>
+                  <Text bold={picks.includes(sel)} color={picks.includes(sel) ? 'suggestion' : undefined}>{text}</Text>
+                </Button>
+              </Box>
+            )
+          })}
           {L.seats.flatMap(s => {
             const w = s.worker
             const say = spots.get(s.key)
+            const inIsle = (L.isles ?? []).some(g => g.keys.length >= 2 && !g.other && g.keys.includes(s.key))
             const pickKey = s.pick ?? s.key
             const isSel = pickKey === sel
             const tone = w?.status === 'unfinished' ? 'error' : w?.status === 'done' ? 'success' : w?.status === 'ask' ? 'warning' : undefined
@@ -1474,8 +1490,8 @@ export const register: Register = on => {
                   </Button>
                 </Box>
               ) : null,
-              // 이름표는 자리 가운데 (고른 사람은 굵게 · 색)
-              <Box key={'tag-' + s.key} position="absolute" top={Math.ceil((s.row + TAG_ROW) * K)} left={xOf(L, s.col) + Math.max(0, Math.floor((CWK - tagW) / 2))}>
+              // 이름표는 자리 가운데 (고른 사람은 굵게 · 색). 섬에 앉은 자리는 섬 이름표 하나로
+              inIsle ? null : <Box key={'tag-' + s.key} position="absolute" top={Math.ceil((s.row + TAG_ROW) * K)} left={xOf(L, s.col) + Math.max(0, Math.floor((CWK - tagW) / 2))}>
                 <Button key={'pick-' + s.key} plain onPress={pick(pickKey)}>
                   <Text bold={isSel} color={isSel ? 'suggestion' : undefined} dimColor={!isSel && away.has(s.key)}>
                     {name}

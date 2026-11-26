@@ -188,9 +188,19 @@ export type Layout = {
   keyOf: (w: Worker) => string // 그 직원이 앉는 자리 (역할 또는 「QA 1팀」)
   k: Scale // 그림 배율 (cols · rows · 자리 위치는 1배 기준, 화면 칸은 xOf · yOf 로)
   xs: number[] // 1배 칸 → 화면 칸 (길이 cols + 1, 마지막 = 화면 폭)
+  isles?: IsleSpot[] // 역할별 섬으로 놓았을 때만
 }
 
 export type Scale = 1 | 1.5 | 2
+
+/** 그림에 놓인 섬 한 조각 (1배 칸 기준). 이름표는 그리는 쪽이 이 자리 아래 하나로 */
+export type IsleSpot = { name: string; people: number; first: boolean; other: boolean; col: number; w: number; row: number; keys: string[] }
+
+/** 1.5배: 시작 칸을 팀장 자리의 12칸 무늬에 맞추는 만큼 (가까운 쪽, 넘치면 왼쪽으로) */
+function alignTo(leadCol: number, x: number, total: number, cols: number): number {
+  const d = (((leadCol - x) % CW) + CW) % CW
+  return d <= CW / 2 && x + d + total <= cols ? d : Math.max(-x, d - CW)
+}
 
 /** 1배 칸 줄 → 화면 칸 줄 */
 export const yOf = (L: Layout, r: number): number => Math.floor(r * L.k)
@@ -242,7 +252,7 @@ export function seatsOf(o: Office, keyOf: (w: Worker) => string = w => w.role): 
   return out // 처음 출근한 순서 그대로 (자리 고정)
 }
 
-export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale }
+export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale; isles?: IsleSeg[][] }
 
 /** 자리 하나에 들어갈 사람 (접은 자리 · +n 자리는 대표 한 명 또는 없음) */
 function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) => string): Omit<Seat, 'col' | 'row'> {
@@ -272,15 +282,70 @@ function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) =
 export const perRowOf = (cols: number): number => Math.max(1, Math.floor((cols - LEFT) / CW))
 const MIN_BIG = 44 // 2배로 그릴 때 1배 기준 최소 폭 (팀장 · 책장 · 문이 다 들어가는 폭)
 
+// -- 역할별 섬 (터미널만) ----------------------------------------------------------------------
+// 직원이 많아 한 줄로는 1배밖에 안 될 때: 같은 쉬운 역할끼리 책상을 붙여 섬을 만들고, 섬들을 두세 줄로 놓아 더 크게 그린다.
+// 섬 이름표는 하나(「디자이너 ×3」). 혼자인 역할들은 「기타」 섬에 모으고 각자 이름표를 그대로 둔다.
+// 직원이 적으면(ISLE_MIN 아래) 섬을 안 만든다 — 지금 모습 그대로.
+export type Isle = { name: string; family: string; keys: string[]; people: number; other?: boolean }
+/** 한 줄에 놓인 섬 한 조각 (섬이 한 줄보다 길면 여러 조각, 이름표는 첫 조각에만 수를 붙인다) */
+export type IsleSeg = { isle: Isle; keys: string[]; first: boolean }
+export const ISLE_MIN = 7 // 자리가 이만큼 넘어야 섬
+const ISLE_ROWS = 3 // 섬 줄은 세 줄까지
+/** 섬 사이 칸. 1.5배는 얼굴이 대칭이게 자리를 12칸 무늬에 맞춰야 해서 한 자리 폭 */
+const isleGap = (k: Scale): number => (k === 1.5 ? CW : CW / 2)
+
+/** 자리들을 역할(생김새 역할)별 섬으로. 처음 나온 역할 순서 그대로, 혼자인 역할이 둘 이상이면 「기타」 섬 하나로 (맨 뒤) */
+export function islesOf(spots: Spot[]): Isle[] {
+  const fams: string[] = []
+  for (const sp of spots) if (!fams.includes(sp.family)) fams.push(sp.family)
+  const groups = fams.map(f => spots.filter(sp => sp.family === f))
+  const singles = groups.filter(g => g.length === 1).map(g => g[0]!)
+  const isle = (name: string, family: string, g: Spot[], other?: boolean): Isle =>
+    ({ name, family, keys: g.map(x => x.key), people: g.reduce((n, x) => n + x.people, 0), ...(other ? { other } : {}) })
+  const out = groups.filter(g => g.length > 1 || singles.length < 2).map(g => isle(g[0]!.family, g[0]!.family, g))
+  if (singles.length >= 2) out.push(isle('기타', '', singles, true))
+  return out
+}
+
+/** 섬들을 줄에 담기: 지금 줄에 통째로 들어가면 거기, 아니면 새 줄, 한 줄보다 길면 한 줄씩 잘라서. 줄이 max 를 넘으면 없음 */
+export function packIsles(isles: Isle[], avail: number, gap: number, max: number): IsleSeg[][] | undefined {
+  const per = Math.max(1, Math.floor(avail / CW))
+  const rows: IsleSeg[][] = []
+  const used = (r: IsleSeg[]) => r.reduce((n, x, i) => n + x.keys.length * CW + (i ? gap : 0), 0)
+  for (const isle of isles) {
+    for (let i = 0; i < isle.keys.length; i += per) {
+      const seg: IsleSeg = { isle, keys: isle.keys.slice(i, i + per), first: i === 0 }
+      const last = rows[rows.length - 1]
+      if (last && used(last) + gap + seg.keys.length * CW <= avail) last.push(seg)
+      else rows.push([seg])
+    }
+  }
+  return rows.length <= max ? rows : undefined
+}
+
 /** 터미널: 「2배 → 1.5배 → 1배 → 접기 → +n」. width · rows = 그림이 쓸 수 있는 칸 · 줄 수.
  *  사람이 적어 줄인 폭(width ÷ 배율)으로도 한 줄에 다 앉고 그 배율 높이가 들어가면 크게, 아니면 1배로 줄 수에 맞춰 접는다.
  *  파트장 아래 직원(boss 있음)은 터미널에선 안 그린다 (파트장 이름표의 「+n」 · 카드로) */
-export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale; spots: Spot[] } {
+export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale; spots: Spot[]; isles?: IsleSeg[][] } {
   const steps = foldSteps(units.filter(u => !u.boss))
   const first = steps[0] ?? []
   for (const k of [2, 1.5] as const) {
     const vw = Math.floor(width / k)
     if (vw >= MIN_BIG && first.length <= perRowOf(vw) && Math.floor(k * (STAFF_TOP + CH)) <= rows) return { k, spots: first }
+  }
+  // 한 줄로는 1배뿐: 역할별 섬을 두세 줄로 놓아 크게 그릴 수 있으면 그쪽 (큰 배율부터)
+  if (first.length >= ISLE_MIN) {
+    const isles = islesOf(first)
+    for (const k of [2, 1.5] as const) {
+      const vw = Math.floor(width / k)
+      const fit = Math.min(ISLE_ROWS, Math.floor((Math.floor(rows / k) - STAFF_TOP) / CH))
+      if (vw < MIN_BIG || fit < 2) continue
+      const packed = packIsles(isles, vw - LEFT, isleGap(k), fit)
+      if (packed && packed.length >= 2) {
+        const order = packed.flat().flatMap(g => g.keys)
+        return { k, spots: order.map(key => first.find(x => x.key === key)!), isles: packed }
+      }
+    }
   }
   const maxRows = Math.max(1, Math.floor((rows - STAFF_TOP) / CH))
   return { k: 1, spots: fold(steps, perRowOf(Math.max(CW + LEFT, Math.min(512, width))) * maxRows) }
@@ -307,6 +372,24 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
   const inRow = Math.max(1, Math.min(perRow, staff.length))
   const wide = Math.min(Math.floor(CW * 1.5), Math.max(CW, Math.floor((cols - LEFT) / inRow)))
   const step = k === 1.5 ? CW * Math.max(1, Math.floor(Math.min(CW * 2, (cols - LEFT) / inRow) / CW)) : wide
+  // 섬 배치: 줄마다 섬 조각을 가운데 모아 놓는다 (섬 안 자리는 붙여서, 섬 사이는 isleGap)
+  if (opts.isles && opts.spots) {
+    const gap = isleGap(k)
+    const isles: IsleSpot[] = []
+    let i = 0
+    opts.isles.forEach((row, r) => {
+      const total = row.reduce((n, g, j) => n + g.keys.length * CW + (j ? gap : 0), 0)
+      let x = LEFT + Math.floor((cols - LEFT - total) / 2)
+      if (k === 1.5) x += alignTo(leadCol, x, total, cols)
+      const top = STAFF_TOP + r * CH
+      for (const g of row) {
+        isles.push({ name: g.isle.name, people: g.isle.people, first: g.first, other: !!g.isle.other, col: x, w: g.keys.length * CW, row: top, keys: g.keys })
+        g.keys.forEach((_, j) => seats.push({ ...staff[i++]!, col: x + j * CW, row: top }))
+        x += g.keys.length * CW + gap
+      }
+    })
+    return { cols, rows: STAFF_TOP + opts.isles.length * CH, seats, shelfX, keyOf, k, xs: colsMap(cols, k, leadCol), isles }
+  }
   staff.forEach((s, i) => {
     const r = Math.floor(i / perRow)
     const c = i % perRow
@@ -679,6 +762,12 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
 
   // 앞뒤 순서: 의자는 맨 뒤, 그다음 발이 위(멀리)에 있는 것부터 그린다 → 앞에 있는 게 뒤에 있는 걸 가린다
   // 같은 일을 나란히 하는 직원(twin): 청록 깔개 하나 위에 같은 책상 · 같은 옷 (묶음 표시)
+  // 역할별 섬: 섬 하나에 짙은 깔개 하나 (자리들이 한 책상 섬으로 묶여 보이게). 같은 일 청록 깔개는 그 위에
+  for (const g of L.isles ?? []) {
+    if (g.keys.length < 2 || g.other) continue
+    fill(b, g.col, g.row * 2 + 8, g.w, 8, 0x8a6440)
+    fill(b, g.col + 1, g.row * 2 + 9, g.w - 2, 6, 0xa57d52)
+  }
   for (const s of L.seats) {
     if (s.kind !== 'twin') continue
     const next = L.seats.find(x => x.kind === 'twin' && x.pick === s.pick && x.row === s.row && x.col > s.col)
