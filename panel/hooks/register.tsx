@@ -459,8 +459,26 @@ async function fillPrompt($: EngineInterface, text: string) {
 }
 
 // -- 놓친 일 서류: 누르면 팀장이 주워 와 확인 → 입력창에 「놓친 일 다시 확인: …」 (보내기는 사람이) -----------------
+// 여러 장을 연달아 누르면 대기열에 쌓아 순차 처리 — 두 서류가 동시에 picked 되면 scene 의 find 가 첫 번째만 걷기 때문.
+// $ 는 세션당 하나의 인스턴스이므로 drainPickQ 에 인자로 넘기고, 큐에는 id(string)만 저장한다.
 const picking = new Set<string>()
-async function pickUp($: EngineInterface, id: string) {
+const pickQ: string[] = []
+let pickBusy = false
+
+async function drainPickQ($: EngineInterface) {
+  if (pickBusy) return
+  pickBusy = true
+  try {
+    while (pickQ.length > 0) {
+      const id = pickQ.shift()!
+      await runPickUp($, id)
+    }
+  } finally {
+    pickBusy = false
+  }
+}
+
+async function runPickUp($: EngineInterface, id: string) {
   if (picking.has(id)) return
   const p = (await read($, office)).papers?.find(x => x.id === id && x.picked === undefined)
   if (!p) return
@@ -485,6 +503,13 @@ async function pickUp($: EngineInterface, id: string) {
   } finally {
     picking.delete(id)
   }
+}
+
+function pickUp($: EngineInterface, id: string) {
+  if (picking.has(id)) return // 현재 줍는 중인 같은 서류
+  if (pickQ.includes(id)) return // 대기열에 같은 서류가 있음
+  pickQ.push(id)
+  void drainPickQ($)
 }
 
 /** 웹에서 누른 서류: serve.py 가 <세션>.pick 에 적어 둔 서류 id 들을 읽고 비운다 (0.3초마다, 웹을 켰을 때만) */
