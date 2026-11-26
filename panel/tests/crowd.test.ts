@@ -242,7 +242,7 @@ test('촘촘한 윗부분 (패널): 그림 몫이 보통 섬 높이보다 낮아
   expect((await ui.findAll({ type: 'Button' })).some(b => b.key === 'card-fold' || b.key === 'card-unfold')).toBe(false)
   const [r] = await ui.findAll({ type: 'Raster' })
   expect(r!.props.rows).toBe(61)
-  expect(r!.props.columns).toBe(112)
+  expect(r!.props.columns).toBe(113) // 1.5배 무늬가 팀장 자리 기준이라 팀장 자리가 옮겨지면 한 칸 차이 (패널 폭 113 안)
   const btns = await ui.findAll({ type: 'Button' })
   expect(btns.filter(b => b.key?.startsWith('isle-btn-')).map(b => b.text)).toEqual(expect.arrayContaining(['디자이너 ×3', '개발자 ×4']))
   expect(btns.find(b => b.key === 'shelf')?.text).toContain('책장')
@@ -426,4 +426,26 @@ test('붐빌 때 퇴근한 자리를 눌러도 사무실 크기 그대로: 접�
   expect(await rowsOf()).toBe(61)
   expect((await btn('card-fold'))!.text).toMatch(/^▸ QA/) // 접어도 고른 직원은 그대로
   await ui.unmount()
+})
+
+test('양쪽 끝 여백: 어떤 폭 · 직원 수 · 배율에서도 맨 왼쪽 · 맨 오른쪽 자리가 패널 끝에서 2칸 이상, 1.5배 얼굴 무늬 · 팀장과 책장 안 겹침 그대로', () => {
+  const at = (L: ReturnType<typeof layout>, c: number) => L.xs[Math.max(0, Math.min(L.cols, c))]!
+  for (let n = 1; n <= 12; n++) {
+    const o = crowd(n)
+    const us = unitsOf(o, 4000)
+    for (let w = 60; w <= 200; w++) for (const r of [40, 70, 90]) {
+      const p = plan(us, w, r)
+      const L = layout(o, w, unitOf, familyOfW, { spots: p.spots, units: us, k: p.k, isles: p.isles, compact: p.compact })
+      const staff = L.seats.slice(1), lead = L.seats[0]!
+      const where = `${n}명 ${w}×${r} 배율 ${p.k}`
+      expect(`${where} 오른쪽 ${w - at(L, Math.max(...staff.map(s => s.col + CW))) >= 2}`).toBe(`${where} 오른쪽 true`)
+      expect(`${where} 왼쪽 ${at(L, Math.min(...staff.map(s => s.col))) >= 2}`).toBe(`${where} 왼쪽 true`)
+      if (p.k === 1.5) expect(`${where} 무늬 ${staff.every(s => (s.col - lead.col) % CW === 0)}`).toBe(`${where} 무늬 true`)
+      if (p.k > 1) expect(`${where} 책장 ${lead.col >= 4 && lead.col + CW <= L.shelfX}`).toBe(`${where} 책장 true`)
+      expect(`${where} 그림 폭 ${outOf(L).cols <= w}`).toBe(`${where} 그림 폭 true`)
+    }
+  }
+  // 경계: 6명 한 줄 1.5배는 117칸부터 (예전엔 114칸부터 — 오른쪽 끝에 붙었음), 4명 2배는 108칸부터 (예전 104칸)
+  expect([116, 117].map(w => plan(unitsOf(crowd(6), 4000), w, 70).k)).toEqual([1, 1.5])
+  expect([107, 108].map(w => plan(unitsOf(crowd(4), 4000), w, 70).k)).toEqual([1.5, 2])
 })

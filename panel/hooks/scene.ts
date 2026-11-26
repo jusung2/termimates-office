@@ -198,10 +198,34 @@ export type Scale = 1 | 1.5 | 2
 /** 그림에 놓인 섬 한 조각 (1배 칸 기준). 이름표는 그리는 쪽이 이 자리 아래 하나로. people = 이 조각 책상에 앉은 사람 수 */
 export type IsleSpot = { name: string; people: number; first: boolean; other: boolean; col: number; w: number; row: number; keys: string[] }
 
-/** 1.5배: 시작 칸을 팀장 자리의 12칸 무늬에 맞추는 만큼 (가까운 쪽, 넘치면 왼쪽으로) */
-function alignTo(leadCol: number, x: number, total: number, cols: number): number {
-  const d = (((leadCol - x) % CW) + CW) % CW
-  return d <= CW / 2 && x + d + total <= cols ? d : Math.max(-x, d - CW)
+/** 1.5배: 폭 span 인 줄의 시작 칸을 팀장 자리의 12칸 무늬에 맞춘다. 원래 자리(want)에서 가까운 쪽 (같으면 오른쪽),
+ *  왼쪽 MIN_L · 오른쪽 RIGHT 여백 안에서만. 맞는 칸이 없으면 undefined (그 배율로는 안 들어감) */
+function aligned15(want: number, span: number, cols: number, leadCol: number): number | undefined {
+  const d = (((leadCol - want) % CW) + CW) % CW
+  return [want + d, want + d - CW, want + d + CW, want + d - 2 * CW]
+    .filter(x => x >= MIN_L && x + span <= cols - RIGHT)
+    .sort((a, b) => Math.abs(a - want) - Math.abs(b - want) || b - a)[0]
+}
+
+/** 1.5배 자리 놓기: 가장 넓은 직원 줄(폭 spans)은 되도록 가운데 두고 팀장 자리를 그 줄 무늬에 맞춰 조금(반 자리 안팎) 옮긴다
+ *  (직원 줄을 팀장에 맞춰 밀면 양쪽 끝에 붙어서). 다른 줄은 그 무늬에 맞춘 시작 칸.
+ *  무늬 따라 두 번 그리는 칸 수가 달라져 화면 폭이 패널 폭(width)을 넘는 자리는 안 고른다. 여백 안에 못 놓으면 starts 에 undefined */
+function place15(cols: number, spans: number[], width: number): { lead: number; starts: (number | undefined)[] } {
+  const lead0 = leadColOf(cols)
+  const limit = Math.max(lead0, cols - SHELF_W - 2 - CW - 10) // 책장 쪽으로는 여기까지
+  const ok = (x: number) => x >= LEFT && x <= limit && colsMap(cols, 1.5, x)[cols]! <= width
+  const wide = spans.indexOf(Math.max(...spans)), span = spans[wide] ?? CW, mid = centerOf(cols, span)
+  // 넓은 줄 시작 칸 후보: 가운데에서 가까운 순 (여백 안)
+  const xs = Array.from({ length: Math.max(0, cols - RIGHT - span - MIN_L + 1) }, (_, i) => MIN_L + i).sort((a, b) => Math.abs(a - mid) - Math.abs(b - mid) || b - a)
+  for (const x of xs) {
+    const d = (((x - lead0) % CW) + CW) % CW
+    for (const lead of d <= CW / 2 ? [lead0 + d, lead0 + d - CW] : [lead0 + d - CW, lead0 + d]) {
+      if (!ok(lead)) continue
+      const starts = spans.map((sp, i) => (i === wide ? x : aligned15(centerOf(cols, sp), sp, cols, lead)))
+      if (starts.every(v => v !== undefined)) return { lead, starts }
+    }
+  }
+  return { lead: lead0, starts: spans.map(() => undefined) }
 }
 
 /** 1배 칸 줄 → 화면 칸 줄 */
@@ -227,6 +251,18 @@ function colsMap(cols: number, k: Scale, origin: number): number[] {
 export const TAG_ROW = 7
 export const HALL = 5 // 팀장 줄과 직원 줄 사이 큰 복도(칸). 사람 키만큼 비워 둬서 걸어 다녀도 책상 · 사람을 덮지 않는다
 const LEFT = 4 // 왼쪽 출입문 자리
+const RIGHT = 2 // 오른쪽 끝 여백 (맨 오른쪽 자리가 패널 끝에 붙지 않게 — 1배 칸이라 크게 그리면 그만큼 넓어짐)
+const MIN_L = 2 // 1.5배 무늬 맞춤으로 자리가 왼쪽(출입문 쪽)으로 밀려도 이만큼은 띄운다
+/** 팀장 자리: 가운데, 책장과 겹치면 왼쪽으로 (보고하러 온 직원이 설 자리도 남긴다) */
+const leadColOf = (cols: number): number => Math.max(LEFT, Math.min(Math.floor((cols - CW) / 2), cols - SHELF_W - 2 - CW - 10))
+/** 한 줄 자리 간격: 사람이 적으면 조금 띄워 고르게 (한 자리 폭의 1.5배까지). 1.5배는 12칸 배수 */
+const stepOf = (cols: number, k: Scale, inRow: number): number => k === 1.5
+  ? CW * Math.max(1, Math.floor(Math.min(CW * 2, (cols - LEFT - RIGHT) / inRow) / CW))
+  : Math.min(Math.floor(CW * 1.5), Math.max(CW, Math.floor((cols - LEFT - RIGHT) / inRow)))
+/** 줄 시작 칸: 왼쪽 출입문 ~ 오른쪽 여백 사이 가운데 */
+const centerOf = (cols: number, span: number): number => LEFT + Math.floor((cols - LEFT - RIGHT - span) / 2)
+/** 1배 칸 폭 (layout 과 같은 셈) */
+const colsOf = (width: number, k: Scale): number => Math.max(CW + LEFT, Math.min(512, Math.floor(width / k)))
 const SHELF_W = 13 // 오른쪽 책장 폭(픽셀)
 
 const STAFF_TOP = WALL + CH + HALL // 첫 직원 줄이 시작하는 칸
@@ -288,7 +324,7 @@ function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) =
 }
 
 /** 한 줄에 앉는 자리 수 */
-export const perRowOf = (cols: number): number => Math.max(1, Math.floor((cols - LEFT) / CW))
+export const perRowOf = (cols: number): number => Math.max(1, Math.floor((cols - LEFT - RIGHT) / CW))
 const MIN_BIG = 44 // 2배로 그릴 때 1배 기준 최소 폭 (팀장 · 책장 · 문이 다 들어가는 폭)
 
 // -- 역할별 섬 (터미널만) ----------------------------------------------------------------------
@@ -343,7 +379,10 @@ export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale
   const first = steps[0] ?? []
   for (const k of [2, 1.5] as const) {
     const vw = Math.floor(width / k)
-    if (vw >= MIN_BIG && first.length <= perRowOf(vw) && Math.floor(k * (STAFF_TOP + CH)) <= rows) return { k, spots: first }
+    // 1.5배는 자리를 팀장 무늬에 맞춘 뒤에도 양쪽 여백 안에 들어가야
+    const c = colsOf(width, k), n = Math.max(1, first.length), span = (n - 1) * stepOf(c, k, n) + CW
+    const fits = k !== 1.5 || place15(c, [span], width).starts[0] !== undefined
+    if (vw >= MIN_BIG && first.length <= perRowOf(vw) && fits && Math.floor(k * (STAFF_TOP + CH)) <= rows) return { k, spots: first }
   }
   // 한 줄로는 1배뿐: 역할별 섬을 두세 줄로 놓아 크게 그릴 수 있으면 그쪽 (큰 배율부터)
   if (first.length >= ISLE_MIN) {
@@ -355,7 +394,10 @@ export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale
       for (const top of [STAFF_TOP, COMPACT_TOP]) {
         const fit = Math.min(ISLE_ROWS, Math.floor((Math.floor(rows / k) - top) / CH))
         if (fit < 2) continue
-        const packed = packIsles(isles, vw - LEFT, isleGap(k), fit)
+        const packed = packIsles(isles, vw - LEFT - RIGHT, isleGap(k), fit)
+        const c = colsOf(width, k)
+        const total = (row: IsleSeg[]) => row.reduce((m, g, j) => m + g.keys.length * CW + (j ? isleGap(k) : 0), 0)
+        if (packed && k === 1.5 && place15(c, packed.map(total), width).starts.some(x => x === undefined)) continue
         if (packed && packed.length >= 2) {
           const order = packed.flat().flatMap(g => g.keys)
           return { k, spots: order.map(key => first.find(x => x.key === key)!), isles: packed, ...(top === COMPACT_TOP ? { compact: true } : {}) }
@@ -370,10 +412,9 @@ export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale
 export function layout(o: Office, width: number, keyOf: (w: Worker) => string, jobOf: (w: Worker) => string = w => w.role,
   opts: Opts = {}): Layout {
   const k = opts.k ?? 1
-  const cols = Math.max(CW + LEFT, Math.min(512, Math.floor(width / k)))
+  const cols = colsOf(width, k)
   const shelfX = cols - SHELF_W - 2
-  // 팀장은 가운데, 책장과 겹치면 왼쪽으로 (보고하러 온 직원이 설 자리도 남긴다)
-  const leadCol = Math.max(LEFT, Math.min(Math.floor((cols - CW) / 2), shelfX - CW - 10))
+  let leadCol = leadColOf(cols)
   // 촘촘한 윗부분은 섬 배치에서만
   const compact = !!(opts.compact && opts.isles && opts.spots)
   const wall = compact ? COMPACT_WALL : WALL
@@ -390,17 +431,23 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
   // 실제 앉은 자리 수만큼만 가운데에: 사람이 적으면 자리 사이를 조금 띄워 고르게 펼친다 (한 자리 폭의 1.5배까지).
   // 1.5배는 자리를 팀장 자리와 같은 12칸 무늬에 맞춰야 얼굴이 대칭이라, 간격을 12칸 배수로 · 시작을 무늬에 맞춘다
   const inRow = Math.max(1, Math.min(perRow, staff.length))
-  const wide = Math.min(Math.floor(CW * 1.5), Math.max(CW, Math.floor((cols - LEFT) / inRow)))
-  const step = k === 1.5 ? CW * Math.max(1, Math.floor(Math.min(CW * 2, (cols - LEFT) / inRow) / CW)) : wide
+  const step = stepOf(cols, k, inRow)
+  // 1.5배: 팀장 자리를 직원 줄 무늬에 맞춘다 (줄마다 시작 칸 at15)
+  const gap = isleGap(k)
+  const spans = opts.isles && opts.spots ? opts.isles.map(row => row.reduce((n, g, j) => n + g.keys.length * CW + (j ? gap : 0), 0))
+    : Array.from({ length: Math.max(1, Math.ceil(staff.length / perRow)) }, (_, r) => {
+      const n = Math.min(perRow, staff.length - r * perRow)
+      return (n - 1) * (n === inRow ? step : CW) + CW
+    })
+  const p15 = k === 1.5 ? place15(cols, spans, width) : undefined
+  if (p15) leadCol = seats[0]!.col = p15.lead
+  const at15 = (r: number, want: number): number => p15?.starts[r] ?? (p15 ? Math.max(MIN_L, want) : want)
   // 섬 배치: 줄마다 섬 조각을 가운데 모아 놓는다 (섬 안 자리는 붙여서, 섬 사이는 isleGap)
   if (opts.isles && opts.spots) {
-    const gap = isleGap(k)
     const isles: IsleSpot[] = []
     let i = 0
     opts.isles.forEach((row, r) => {
-      const total = row.reduce((n, g, j) => n + g.keys.length * CW + (j ? gap : 0), 0)
-      let x = LEFT + Math.floor((cols - LEFT - total) / 2)
-      if (k === 1.5) x += alignTo(leadCol, x, total, cols)
+      let x = at15(r, centerOf(cols, spans[r]!))
       const y = top + r * CH
       for (const g of row) {
         // 이름표 수 = 이 조각 책상에 앉은 사람 수 (같은 생김새 역할이라 한 섬으로 묶인 다른 이름 자리가 다음 줄로 넘어가도 안 셈)
@@ -417,12 +464,7 @@ export function layout(o: Office, width: number, keyOf: (w: Worker) => string, j
     const c = i % perRow
     const n = Math.min(perRow, staff.length - r * perRow) // 이 줄 자리 수
     const st = n === inRow ? step : CW
-    let margin = LEFT + Math.floor((cols - LEFT - (n - 1) * st - CW) / 2)
-    if (k === 1.5) {
-      const d = (((leadCol - margin) % CW) + CW) % CW
-      margin += d <= CW / 2 && margin + d + (n - 1) * st + CW <= cols ? d : d - CW
-      margin = Math.max(0, margin)
-    }
+    const margin = at15(r, centerOf(cols, (n - 1) * st + CW))
     seats.push({ ...s, col: margin + c * st, row: STAFF_TOP + r * CH })
   })
   const staffRows = Math.max(1, Math.ceil(staff.length / perRow))
