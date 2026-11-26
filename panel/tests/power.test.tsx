@@ -94,10 +94,10 @@ test('전기세 · 피로도: 팀장 · 직원 몫, 오늘 합계와 평소 대�
     await has(ui, /사무실 표시 0/)
     await ui.press({ key: 'pick-main' })
     await has(ui, /피로도: 68% 하품/)
-    await has(ui, /전기세 몫 \(이번 세션\): 40만/)
+    await has(ui, /피로도: 68% 하품 · 전기세 40만/) // 피로도와 한 줄 (72칸은 좁아서 대화량 · 나눔을 빼고 합계만)
     await ui.press({ key: 'pick-디자이너' })
     await has(ui, /피로도: 25% 쌩쌩/)
-    await has(ui, /전기세 몫: 12만 · 일반 2만 · 할인 9만 · 고출력 1만/)
+    await has(ui, /피로도: 25% 쌩쌩 · 전기세 12만/) // 직원 카드도 한 줄
     await ui.unmount()
   }
 

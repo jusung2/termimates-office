@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 
-import type { Fill, LogEntry, Office, Power, Replay, View } from '../types'
+import type { Fill, LogEntry, Office, Power, Replay, Tok, View } from '../types'
 import { HOLD, IDLE_DEMO, startDemo, STEPS } from './demo'
 import {
   addUsage, boardOf, donePaper, EMPTY, familyOfW, isAsk, jobOfW, log, onComplete, onMissed, onPrompt, onRename, onSpawn, onStart, onTalk,
@@ -15,7 +15,7 @@ import {
 import {
   adviceOf, average, bar, baseline, dayKey, dayOf, EMPTY_POWER, isOld, LED, man, parts, percentOf, plus, stageOf, sum, tokOf, ZERO,
 } from './power'
-import { CW, draw, encode, isGone, isMoving, layout, outOf, paperSpots, plan, seatsOf, TAG_ROW, xOf, zoom } from './scene'
+import { CW, draw, encode, isCrowded, isGone, isMoving, layout, outOf, paperSpots, plan, seatsOf, TAG_ROW, xOf, zoom } from './scene'
 import type { Layout } from './scene'
 import { reportOf, stepsFromLog } from './replay'
 import { setLocalNotes, skillNote, skillRole } from './skills'
@@ -68,7 +68,7 @@ export function tagText(s: { name: string; kind?: string; count: number; kids?: 
 
 let lastWidth = 0 // 애니메이션 타이머가 쓰는 패널 폭 (다시 그릴 때마다 갱신)
 let lastRows = 0 // 그림이 쓸 수 있는 줄 수 (패널 높이 - 위 글줄 - 카드 몫)
-let cardRows = 12 // 그림 아래 카드 몫 (지난번에 그린 카드 높이. 한 줄 줄어든 건 무시 — 카드가 한 줄 바뀔 때마다 그림이 들썩이지 않게)
+let cardRows = 12 // 그림 아래 카드 몫 (그리기마다 이번 카드 높이로 다시 잼 — 처음 한 번만 이 값으로 어림)
 
 /** 글 한 줄이 폭 안에서 몇 줄로 접히는지 */
 const wrapped = (text: string, width: number): number => Math.max(1, Math.ceil(dw(text) / Math.max(1, width)))
@@ -1203,123 +1203,167 @@ export const register: Register = on => {
     })() : null
     const headRows = 1 + (live ? 0 : 1) + 3 + (tired ? 1 : 0) + (waitRow ? 1 : 0) + (reportLine ? 1 : 0) + (paperRow ? 1 : 0) +
       wrapped(o.prompt ? `사장님 지시 「${o.prompt}」` : '아직 사장님 지시 없음', width) + wrapped(situation, width)
-    lastRows = Math.max(1, (e.props.scroll?.bodyRows ?? 40) - headRows - cardRows)
-    const L = sceneOf(o, width, lastRows, now)
+    const bodyRows = e.props.scroll?.bodyRows ?? 40
+    lastRows = Math.max(1, bodyRows - headRows - cardRows)
+    let L = sceneOf(o, width, lastRows, now)
     const units = unitsOf(o, now)
-    const K = L.k
-    const OUT = outOf(L)
-    const CWK = Math.round(CW * K) // 화면에서 자리 한 칸 폭
     // 고를 수 있는 것: 팀장 · 자리 · 접은 자리(fold:…) · +n · 그림에 없어도 있는 자리(파트장 아래 직원)
     const sel = v.selected === 'main' || units.some(u => u.key === v.selected) || L.seats.some(s => s.pick === v.selected) ? v.selected : 'main'
     const selSeat = L.seats.find(s => s.pick === sel && (s.kind === 'fold' || s.kind === 'more'))
 
     // 고른 직원의 이야기
-    const detail: JSX.Element[] = []
+    let detail: JSX.Element[] = []
     let detailRows = 0 // 카드 높이 (그림 몫 계산용)
     const line = (key: string, text: string, props: Record<string, unknown> = {}) => {
       detailRows += wrapped(text, width - 4) // 테두리 2 + 안쪽 여백 2
       detail.push(<Text key={key} {...props}>{text}</Text>)
     }
-    if (sel === 'main') {
-      line('d-h', '팀장 · 메인 Claude', { bold: true })
-      line('d-now', `지금: ${o.lead.action} · ${ago(now - o.lead.since)}째`)
-      line('d-f', leadPct !== undefined
-        ? `피로도: ${leadPct}% ${st!.name} · 들고 있는 대화 ${man(pw.lead!.tokens)} / ${man(pw.lead!.window)} 토큰`
-        : '피로도: 아직 안 잼 (다음 대답 때 재요)', { color: st?.color })
-      const mineT = pw.byWorker.main
-      if (sum(mineT)) line('d-pw', `전기세 몫 (이번 세션): ${man(sum(mineT))} · ${parts(mineT!)}`, { color: LED.num })
-      if (o.prompt) line('d-p', `사장님 지시: 「${o.prompt}」 · ${ago(now - (o.promptAt ?? now))} 전`)
-      if (o.said && (o.lead.status === 'idle' || o.lead.status === 'wait_report')) line('d-s', `마지막으로 한 말: ${o.said}`, { dimColor: true })
-      if (o.workers.length) {
-        line('d-ah', '맡긴 일:', { bold: true })
-        o.workers.slice(-6).reverse().forEach((w, i) =>
-          line('d-a' + i, `  ${unitOf(w)}${w.member ? ` ${w.member}` : ''} — ${w.task || '(설명 없음)'} · ${w.status === 'done' ? '보고 완료' : w.action}`))
-      }
-      const rvs = (o.reviews ?? []).filter(r => r.at >= (o.promptAt ?? 0)).slice(-3)
-      if (rvs.length) {
-        line('d-rvh', '검사 결과:', { bold: true })
-        rvs.forEach((r, i) => line('d-rv' + i, `  ${reviewLine(r)}`, { color: r.verdict === 'reject' ? 'error' : r.verdict === 'pass' ? 'success' : undefined }))
-      }
-      if (o.lead.recent.length) {
-        // 4줄만 (나머지는 사무실 소식에) — 카드가 짧아야 그림이 커진다
-        line('d-rh', '한 일:', { bold: true })
-        o.lead.recent.slice(0, 4).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
-      }
-    } else if (selSeat) {
-      // 접은 자리 · +n: 그 안의 자리마다 사람과 각자 상태
-      const inside = units.filter(u => selSeat.ids?.some(id => u.list.some(w => w.id === id)))
-      line('d-h', selSeat.kind === 'more' ? `자리가 모자라 접은 ${selSeat.name.slice(1)}` : `${selSeat.name} (같은 직군 접음)`, { bold: true })
-      line('d-fn', '자리가 모자라 한 자리로 접었어요. 패널을 넓히거나 키우면 펼쳐져요.', { dimColor: true })
-      inside.forEach((u, i) => {
-        line('d-u' + i, `${u.key} · ${u.active.length ? `일하는 중 ${u.active.length}명` : '다 끝남'}${u.loop ? ` · ⟳${u.loop}` : ''}`, { bold: true })
-        ;[...u.list].reverse().slice(0, 4).forEach((x, j) => line(`d-u${i}-${j}`,
-          `  ${x.member ?? ''}${x.member ? ' ' : ''}${x.status === 'done' ? '보고 완료 ✓' : x.ended !== undefined ? '퇴근' : x.action} — ${x.task || '(설명 없음)'}`,
-          { dimColor: x.ended !== undefined }))
-      })
-    } else {
-      const list = o.workers.filter(w => unitOf(w) === sel).reverse()
-      const w = list.find(x => x.ended === undefined) ?? list[0]
-      line('d-h', `${sel}${list.length > 1 ? ` · 이번 세션 ${list.length}번 출근` : ''}`, { bold: true })
-      // 청록 깔개(나란히 자리)로 앉은 자리면 맨 위에 그 뜻을 쉬운 말로 (그림엔 글자 없이 깔개만)
-      const twinsHere = L.seats.filter(x => x.kind === 'twin' && x.pick === sel).length
-      if (twinsHere) line('d-twin', `같은 일을 나눠서 동시에 하는 직원들이에요 (${twinsHere}명)`, { color: 'suggestion' }) // 그림의 청록 깔개 · 「같은 일 ×n」
-      if (w) {
-        const kinds = [...new Set(list.map(x => x.role))].join(', ')
-        if (kinds !== sel) line('d-k', `에이전트 종류: ${kinds}`, { dimColor: true })
-        if (w.tier) line('d-tier', `모델 직급: ${tierText(w.tier)}${w.model ? ` · ${w.model}` : ''}`)
-        if (w.persona) line('d-persona', `페르소나: 「${w.persona}」`, { color: 'error' })
-        if (w.checker) {
-          // 검사 직원: 무엇을 보는지 · 결과 (반려 이유는 마지막 글에서 뽑을 수 있을 때만)
-          const of = w.reviewOf ? o.workers.find(x => x.id === w.reviewOf) : undefined
-          const last = [...(o.reviews ?? [])].reverse().find(r => r.by === w.id)
-          line('d-rv', last ? `🔍 ${reviewLine(last)}` : `🔍 검사 직원 · ${of ? `${unitOf(of)} 서류 검토 중` : '검토 중'}`,
-            { color: last?.verdict === 'reject' ? 'error' : last?.verdict === 'pass' ? 'success' : undefined })
+    // 피로도 + 전기세 몫 한 줄. 좁으면 덜 중요한 것부터 줄인다: 대화량 짧게 → 「(이번 세션)」 빼기 → 대화량 빼기 → 나눔(일반 · 할인 …) 빼기 → 단계 이름 빼기
+    // fat: [긴, 짧은] 피로도 · talkTok: [긴, 짧은] 대화량 (없으면 빈 배열)
+    const fuelLine = (fat: [string, string], talkTok: [string, string] | [], color: string | undefined, share: Tok | undefined, note = '') => {
+      const tok = sum(share)
+      const conv = [...talkTok, '']
+      const power = tok ? [` · 전기세 몫${note}: ${man(tok)} · ${parts(share!)}`, ` · 전기세 몫: ${man(tok)} · ${parts(share!)}`, ` · 전기세 ${man(tok)}`] : ['', '', '']
+      const steps: [number, number, number][] = [[0, 0, 0], [0, 1, 0], [0, 1, 1], [0, 2, 1], [0, 2, 2], [1, 2, 2]]
+      const room = width - 4
+      const at = (f: number, c: number, p: number) => [fat[f], conv[Math.min(c, conv.length - 1)]!, power[p]!] as const
+      const [f, c, p0] = steps.map(([a, b, d]) => at(a, b, d)).find(x => dw(x.join('')) <= room) ?? at(1, 2, 2)
+      const p = f + c ? p0 : p0.replace(/^ · /, '') // 피로도를 못 쟀으면 전기세부터
+      detailRows += wrapped(f + c + p, room)
+      detail.push(<Text key="d-f"><Text color={color}>{f + c}</Text>{p ? <Text color={LED.num}>{p}</Text> : null}</Text>)
+    }
+    // crowded = 붐빌 때 짧은 카드 (맡긴 일 3줄 + 「외 n건」 · 한 일 2줄 · 설명 줄 빼기)
+    const buildCard = async (crowded: boolean) => {
+      detail = []
+      detailRows = 0
+      const doneN = crowded ? 2 : undefined
+      if (sel === 'main') {
+        // 지금 하는 일 · 사장님 지시는 위 글줄에 이미 있어서 카드엔 안 쓴다 (몇 초째만 머리줄에)
+        line('d-h', `팀장 · 메인 Claude · 지금 일 ${ago(now - o.lead.since)}째`, { bold: true })
+        if (leadPct !== undefined) fuelLine([`피로도: ${leadPct}% ${st!.name}`, `피로도 ${leadPct}%`],
+          [` · 대화 ${man(pw.lead!.tokens)} / ${man(pw.lead!.window)} 토큰`, ` · 대화 ${man(pw.lead!.tokens)}`], st?.color, pw.byWorker.main, ' (이번 세션)')
+        else fuelLine(['피로도: 아직 안 잼 (다음 대답 때 재요)', '피로도: 아직 안 잼'], [], undefined, pw.byWorker.main, ' (이번 세션)')
+        if (o.said && (o.lead.status === 'idle' || o.lead.status === 'wait_report')) line('d-s', `마지막으로 한 말: ${o.said}`, { dimColor: true })
+        if (o.workers.length) {
+          // 붐비면 일하는 중인 것부터 3줄 + 「외 n건」, 아니면 최근 6건
+          const recent = [...o.workers].reverse()
+          const shown = crowded ? [...recent.filter(w => w.ended === undefined), ...recent.filter(w => w.ended !== undefined)].slice(0, 3) : recent.slice(0, 6)
+          const rest = crowded ? o.workers.length - shown.length : 0
+          line('d-ah', `맡긴 일${crowded ? ` ${o.workers.length}건` : ''}:`, { bold: true })
+          shown.forEach((w, i) =>
+            line('d-a' + i, `  ${unitOf(w)}${w.member ? ` ${w.member}` : ''} — ${w.task || '(설명 없음)'} · ${w.status === 'done' ? '보고 완료' : w.action}`))
+          if (rest > 0) line('d-amore', `  외 ${rest}건 (직원을 누르면 보여요)`, { dimColor: true })
         }
-        const unit = units.find(u => u.key === sel)
-        if (unit?.boss) line('d-boss', `${unit.boss} 파트장이 맡긴 일 (사무실엔 파트장 자리에 「+n」 으로만 보여요)`, { dimColor: true })
-        if (unit?.loop) line('d-loop', `⟳ ${unit.loop}번째 다시 하는 중 (반려 · 같은 일 다시 맡김)`, { color: 'warning' })
-        if (unit?.kids) {
-          // 파트장: 이 직원이 부른 직원들 (터미널엔 층을 안 그리고 여기서만)
-          const ids = new Set(unit.list.map(x => x.id))
-          const kids = o.workers.filter(x => x.parent && !ids.has(x.id) && units.some(u => u.boss === sel && u.list.includes(x)))
-          line('d-kh', `파트원 ${unit.kids}명 · 일하는 중 ${kids.filter(x => x.ended === undefined).length}명`, { bold: true })
-          ;[...kids].reverse().slice(0, 6).forEach((x, i) => line('d-k' + i,
-            `  ${unitOf(x)} — ${x.task || '(설명 없음)'} · ${x.status === 'done' ? '보고 완료 ✓' : x.ended !== undefined ? '퇴근' : x.action}`,
-            { dimColor: x.ended !== undefined }))
+        const rvs = (o.reviews ?? []).filter(r => r.at >= (o.promptAt ?? 0)).slice(-3)
+        if (rvs.length) {
+          line('d-rvh', '검사 결과:', { bold: true })
+          rvs.forEach((r, i) => line('d-rv' + i, `  ${reviewLine(r)}`, { color: r.verdict === 'reject' ? 'error' : r.verdict === 'pass' ? 'success' : undefined }))
         }
-        if (list.some(x => x.team) || (unit && unit.active.length >= 2)) {
-          // 팀 자리: 팀원마다 한 줄 (출근 순). 사무실엔 팀 하나 = 한 자리만 그린다
-          const state = (x: typeof w) =>
-            x.status === 'done' ? '보고 완료 ✓' : x.status === 'unfinished' ? '못 끝냄' : x.ended !== undefined ? '퇴근' : x.action
-          line('d-mh', `${list.some(x => x.team) ? '팀원' : '같은 일 직원'} ${list.length}명 · 일하는 중 ${list.filter(x => x.ended === undefined).length}명`, { bold: true })
-          ;[...list].reverse().forEach((x, i) => line('d-m' + i,
-            `  ${x.member ?? i + 1}  ${state(x)} — ${x.task || '(설명 없음)'}${x.handback ? ` · 서류 「${clip(x.handback, 40)}」` : ''}`,
-            { dimColor: x.ended !== undefined }))
-        }
-        line('d-now', w.status === 'done' ? `상태: 보고 완료 · ${ago(now - (w.ended ?? now))} 전` : `지금: ${w.action} · ${ago(now - w.since)}째`)
-        if (w.task) line('d-t', `맡은 일: ${w.task} (팀장이 맡김)`)
-        const fill = (live && w.ended === undefined ? await workerFill($, w.id) : undefined) ?? pw.workers[w.id]
-        const wp = percentOf(fill)
-        if (wp !== undefined) {
-          const ws = stageOf(wp)
-          line('d-f', `피로도: ${wp}% ${ws.name} · 들고 있는 대화 ${man(fill!.tokens)} / ${man(fill!.window)} 토큰`, { color: ws.color })
-          if (wp >= 70) line('d-fn', '대화가 많이 찼어요. 남은 일은 새 직원에게 나눠 맡기면 덜 피곤해요 (일이 끝나면 이 대화는 버려지고 다음 직원은 0% 부터).', { dimColor: true })
-        }
-        const share = list.reduce((acc, x) => (pw.byWorker[x.id] ? plus(acc, pw.byWorker[x.id]!) : acc), ZERO)
-        if (sum(share)) {
-          line('d-pw', `전기세 몫${list.length > 1 ? ` (${list.length}번 출근 합계)` : ''}: ${man(sum(share))} · ${parts(share)}`, { color: LED.num })
-          line('d-pn', '실제 AI 직원이라 팀장과 따로 대화를 들고 일해요. 직원이 많을수록 전기세가 더 나와요.', { dimColor: true })
-        }
-        if (w.handback) line('d-hb', `넘긴 서류: 「${w.handback}」`, { color: 'suggestion' })
-        if (w.error) line('d-e', `⚠ 실패: ${w.error}`, { color: 'error' })
-        if (w.recent.length) {
+        if (o.lead.recent.length) {
+          // 4줄만 (나머지는 사무실 소식에) — 카드가 짧아야 그림이 커진다
           line('d-rh', '한 일:', { bold: true })
-          w.recent.slice(0, 6).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
+          o.lead.recent.slice(0, doneN ?? 4).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
+        }
+      } else if (selSeat) {
+        // 접은 자리 · +n: 그 안의 자리마다 사람과 각자 상태
+        const inside = units.filter(u => selSeat.ids?.some(id => u.list.some(w => w.id === id)))
+        line('d-h', selSeat.kind === 'more' ? `자리가 모자라 접은 ${selSeat.name.slice(1)}` : `${selSeat.name} (같은 직군 접음)`, { bold: true })
+        line('d-fn', '자리가 모자라 한 자리로 접었어요. 패널을 넓히거나 키우면 펼쳐져요.', { dimColor: true })
+        inside.forEach((u, i) => {
+          line('d-u' + i, `${u.key} · ${u.active.length ? `일하는 중 ${u.active.length}명` : '다 끝남'}${u.loop ? ` · ⟳${u.loop}` : ''}`, { bold: true })
+          ;[...u.list].reverse().slice(0, 4).forEach((x, j) => line(`d-u${i}-${j}`,
+            `  ${x.member ?? ''}${x.member ? ' ' : ''}${x.status === 'done' ? '보고 완료 ✓' : x.ended !== undefined ? '퇴근' : x.action} — ${x.task || '(설명 없음)'}`,
+            { dimColor: x.ended !== undefined }))
+        })
+      } else {
+        const list = o.workers.filter(w => unitOf(w) === sel).reverse()
+        const w = list.find(x => x.ended === undefined) ?? list[0]
+        line('d-h', `${sel}${list.length > 1 ? ` · 이번 세션 ${list.length}번 출근` : ''}`, { bold: true })
+        // 청록 깔개(나란히 자리)로 앉은 자리면 맨 위에 그 뜻을 쉬운 말로 (그림엔 글자 없이 깔개만)
+        const twinsHere = L.seats.filter(x => x.kind === 'twin' && x.pick === sel).length
+        if (twinsHere) line('d-twin', `같은 일을 나눠서 동시에 하는 직원들이에요 (${twinsHere}명)`, { color: 'suggestion' }) // 그림의 청록 깔개 · 「같은 일 ×n」
+        if (w) {
+          const kinds = [...new Set(list.map(x => x.role))].join(', ')
+          if (kinds !== sel) line('d-k', `에이전트 종류: ${kinds}`, { dimColor: true })
+          if (w.tier) line('d-tier', `모델 직급: ${tierText(w.tier)}${w.model ? ` · ${w.model}` : ''}`)
+          if (w.persona) line('d-persona', `페르소나: 「${w.persona}」`, { color: 'error' })
+          if (w.checker) {
+            // 검사 직원: 무엇을 보는지 · 결과 (반려 이유는 마지막 글에서 뽑을 수 있을 때만)
+            const of = w.reviewOf ? o.workers.find(x => x.id === w.reviewOf) : undefined
+            const last = [...(o.reviews ?? [])].reverse().find(r => r.by === w.id)
+            line('d-rv', last ? `🔍 ${reviewLine(last)}` : `🔍 검사 직원 · ${of ? `${unitOf(of)} 서류 검토 중` : '검토 중'}`,
+              { color: last?.verdict === 'reject' ? 'error' : last?.verdict === 'pass' ? 'success' : undefined })
+          }
+          const unit = units.find(u => u.key === sel)
+          if (unit?.boss) line('d-boss', `${unit.boss} 파트장이 맡긴 일 (사무실엔 파트장 자리에 「+n」 으로만 보여요)`, { dimColor: true })
+          if (unit?.loop) line('d-loop', `⟳ ${unit.loop}번째 다시 하는 중 (반려 · 같은 일 다시 맡김)`, { color: 'warning' })
+          if (unit?.kids) {
+            // 파트장: 이 직원이 부른 직원들 (터미널엔 층을 안 그리고 여기서만)
+            const ids = new Set(unit.list.map(x => x.id))
+            const kids = o.workers.filter(x => x.parent && !ids.has(x.id) && units.some(u => u.boss === sel && u.list.includes(x)))
+            line('d-kh', `파트원 ${unit.kids}명 · 일하는 중 ${kids.filter(x => x.ended === undefined).length}명`, { bold: true })
+            ;[...kids].reverse().slice(0, 6).forEach((x, i) => line('d-k' + i,
+              `  ${unitOf(x)} — ${x.task || '(설명 없음)'} · ${x.status === 'done' ? '보고 완료 ✓' : x.ended !== undefined ? '퇴근' : x.action}`,
+              { dimColor: x.ended !== undefined }))
+          }
+          if (list.some(x => x.team) || (unit && unit.active.length >= 2)) {
+            // 팀 자리: 팀원마다 한 줄 (출근 순). 사무실엔 팀 하나 = 한 자리만 그린다
+            const state = (x: typeof w) =>
+              x.status === 'done' ? '보고 완료 ✓' : x.status === 'unfinished' ? '못 끝냄' : x.ended !== undefined ? '퇴근' : x.action
+            line('d-mh', `${list.some(x => x.team) ? '팀원' : '같은 일 직원'} ${list.length}명 · 일하는 중 ${list.filter(x => x.ended === undefined).length}명`, { bold: true })
+            const ms = [...list].reverse()
+            const shown = crowded ? [...ms.filter(x => x.ended === undefined), ...ms.filter(x => x.ended !== undefined)].slice(0, 3) : ms
+            shown.forEach((x, i) => line('d-m' + i,
+              `  ${x.member ?? ms.indexOf(x) + 1}  ${state(x)} — ${x.task || '(설명 없음)'}${x.handback ? ` · 서류 「${clip(x.handback, 40)}」` : ''}`,
+              { dimColor: x.ended !== undefined }))
+            if (ms.length > shown.length) line('d-mmore', `  외 ${ms.length - shown.length}명`, { dimColor: true })
+          }
+          line('d-now', w.status === 'done' ? `상태: 보고 완료 · ${ago(now - (w.ended ?? now))} 전` : `지금: ${w.action} · ${ago(now - w.since)}째`)
+          if (w.task) line('d-t', `맡은 일: ${w.task} (팀장이 맡김)`)
+          const fill = (live && w.ended === undefined ? await workerFill($, w.id) : undefined) ?? pw.workers[w.id]
+          const wp = percentOf(fill)
+          const share = list.reduce((acc, x) => (pw.byWorker[x.id] ? plus(acc, pw.byWorker[x.id]!) : acc), ZERO)
+          // 피로도 + 전기세 몫 한 줄 (재 본 게 없으면 전기세만)
+          const ws = wp !== undefined ? stageOf(wp) : undefined
+          if (ws || sum(share)) {
+            const note = list.length > 1 ? ` (${list.length}번 출근 합계)` : ''
+            if (ws) fuelLine([`피로도: ${wp}% ${ws.name}`, `피로도 ${wp}%`], [` · 대화 ${man(fill!.tokens)} / ${man(fill!.window)} 토큰`, ` · 대화 ${man(fill!.tokens)}`], ws.color, share, note)
+            else fuelLine(['', ''], [], undefined, share, note)
+          }
+          if (wp !== undefined && wp >= 70) line('d-fn', '대화가 많이 찼어요. 남은 일은 새 직원에게 나눠 맡기면 덜 피곤해요 (일이 끝나면 이 대화는 버려지고 다음 직원은 0% 부터).', { dimColor: true })
+          if (sum(share) && !crowded) line('d-pn', '실제 AI 직원이라 팀장과 따로 대화를 들고 일해요. 직원이 많을수록 전기세가 더 나와요.', { dimColor: true })
+          if (w.handback) line('d-hb', `넘긴 서류: 「${w.handback}」`, { color: 'suggestion' })
+          if (w.error) line('d-e', `⚠ 실패: ${w.error}`, { color: 'error' })
+          if (w.recent.length) {
+            line('d-rh', '한 일:', { bold: true })
+            w.recent.slice(0, doneN ?? 6).forEach(([t, text], i) => line('d-r' + i, `  ${hhmm(t)}  ${text}`, { dimColor: true }))
+          }
         }
       }
     }
     const mine = o.workers.filter(w => unitOf(w) === sel).reverse()
     const agentId = !live || sel === 'main' ? undefined : (mine.find(w => w.ended === undefined) ?? mine[0])?.id
+    const selW = mine.find(w => w.ended === undefined) ?? mine[0]
+    const hasRename = live && !!selW && !isGeneric(selW.role)
+
+    // 붐비는가: 섬 후보이거나, 보통 카드를 놓으면 그림 몫이 모자라 자리가 접힐 때 (보통 카드 높이로만 정해서 그리기마다 오락가락하지 않게)
+    const extra = 2 + (!live || sel === 'main' || agentId ? 1 : 0) + (hasRename ? 1 : 0) + (agentId ? 1 : 0) // 테두리 2 · 말 걸기 · 이름 바꾸기 · 대화 보기 단추
+    await buildCard(false)
+    const folds = plan(units, width, Math.max(1, bodyRows - headRows - detailRows - extra)).spots.some(x => x.kind === 'fold' || x.kind === 'more')
+    if (e.surface === 'terminal' && (isCrowded(units) || folds)) await buildCard(true)
+    // 그림 몫을 이번 카드 높이로 정확히: 지난번과 다르면 다시 놓는다.
+    // 카드가 안 보일 때(책장 · 안내 · 피로도 · 보고서)는 지난번 몫 그대로 (그림이 들썩이지 않게)
+    if (e.surface === 'terminal' && !(v.shelf || v.guide || v.tired || (v.report && rep))) {
+      const rows = detailRows + extra
+      if (rows !== cardRows) {
+        cardRows = rows
+        lastRows = Math.max(1, bodyRows - headRows - cardRows)
+        L = sceneOf(o, width, lastRows, now)
+      }
+    }
+    const K = L.k
+    const OUT = outOf(L)
+    const CWK = Math.round(CW * K) // 화면에서 자리 한 칸 폭
 
     // 말풍선 자리: 자기 책상 폭이 기본, 옆자리에 말풍선이 없으면 그 자리 반까지, 줄 끝이면 끝까지 넓힌다.
     // (팀장은 그 줄에 혼자라 줄 전체를 쓴다.) 그래도 좁으면 짧은 말로 바꾼다.
@@ -1383,8 +1427,7 @@ export const register: Register = on => {
     ) : null
 
     // ✏️ 이름 바꾸기: 이 종류의 에이전트를 앞으로 이 이름으로 (general-purpose 처럼 이름으로 일을 모르는 종류는 빼고)
-    const selW = mine.find(w => w.ended === undefined) ?? mine[0]
-    const renameBox = live && selW && !isGeneric(selW.role) ? (
+    const renameBox = hasRename && selW ? (
       <Input key={'rename-' + selW.role + '-' + (v.talks ?? 0)} label={`이름 바꾸기 (${selW.role}): `} submitLabel="바꾸기"
         placeholder={`지금 「${sel}」 — 새 이름 쓰고 Enter`}
         onSubmit={async value => {
@@ -1518,11 +1561,6 @@ export const register: Register = on => {
       )
     }
 
-    // 다음 그림 몫: 카드가 보일 때만 높이를 다시 잰다 (테두리 2 · 말 걸기 1 · 이름 바꾸기 1 · 대화 보기 단추 1)
-    if (e.surface === 'terminal' && !(v.shelf || v.guide || v.tired || (v.report && rep))) {
-      const rows = detailRows + 2 + (talk ? 1 : 0) + (renameBox ? 1 : 0) + (agentId ? 1 : 0)
-      if (rows > cardRows || cardRows - rows >= 2) cardRows = rows // 커지면 바로(넘치지 않게), 줄면 2줄 넘게 줄 때만
-    }
     return (
       <Box flexDirection="column">
         {tabs}
