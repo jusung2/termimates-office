@@ -334,6 +334,8 @@ test('붐빌 때 카드 접기: 접어야 섬이 커질 때만 「▸ 팀장 …
     expect(f!.text).toBe(`▸ 팀장 · 피로도 아직 안 잼 · 맡긴 일 ${m}건 (일하는 중 ${m}) · 누르면 펼침`)
     expect((await texts(ui)).some(x => x.startsWith('맡긴 일'))).toBe(false) // 카드 몸통은 접힘
     expect(dw(f!.text!)).toBeLessThanOrEqual(113)
+    // 섬 이름표 수 = 그 섬 책상에 앉은 사람 수 (생김새가 같은 깃 담당이 다음 줄로 넘어가도 개발자 섬엔 안 셈)
+    if (m === 10) expect((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('isle-btn-')).map(b => b.text)).toEqual(['디자이너 ×3', '개발자 ×5'])
     // 누르면 펼침 → 1배 · 머리줄 「▾ 팀장 …」, 다시 그려도(다시 열어도) 펼친 채
     await ui.press({ key: 'card-fold' })
     expect(await rowsOf(ui)).toBe(35)
