@@ -1,7 +1,7 @@
 // 일어난 일 → 사무실 상태 (순수 함수). 실제 훅과 시연(/termimates 시연)이 같은 함수를 쓴다:
 // 시연 장면이 실제로 일할 때와 똑같이 보이도록.
 
-import type { Fill, Office, Power, Tok, Worker } from '../types'
+import type { Fill, Office, Power, Review, Tok, Worker } from '../types'
 import { plus, sum } from './power'
 import { skillRole } from './skills'
 import { actionText, clip, doneText, familyOf, jobOf, memberOf, teamOf, title } from './words'
@@ -12,8 +12,12 @@ export const jobOfW = (w: Worker): string => w.job ?? title(w.role)
 /** 그 직원의 생김새용 기본 역할 (이름이 뭐든) */
 export const familyOfW = (w: Worker): string => w.family ?? familyOf(w.role, w.task)
 
-/** 사무실 한 자리 = 한 명 또는 한 팀. QA 3팀 × 3명이면 9명이 아니라 팀마다 한 자리(세 자리). 같은 역할 · 같은 팀이면 같은 자리 */
-export const unitOf = (w: Worker): string => (w.team ? `${jobOfW(w)} ${w.team}팀` : jobOfW(w))
+/** 이름표에 쓰는 자리 이름 (「QA 1팀」 · 「리서처」) */
+export const nameOf = (w: Worker): string => (w.team ? `${jobOfW(w)} ${w.team}팀` : jobOfW(w))
+
+/** 사무실 한 자리 = 한 명 또는 한 팀. QA 3팀 × 3명이면 9명이 아니라 팀마다 한 자리(세 자리). 같은 역할 · 같은 팀이면 같은 자리.
+ *  파트장(다른 직원)이 부른 직원은 파트장 아래 따로 (「개발자 · 개발자 파트」 — 파트장과 같은 역할이어도 안 섞인다) */
+export const unitOf = (w: Worker): string => (w.part ? `${nameOf(w)} · ${w.part} 파트` : nameOf(w))
 
 export const fresh = (id: string, role: string, now: number): Worker => ({
   id, role, task: '', status: 'desk', action: '출근 전', since: now, started: now, background: false, recent: [],
@@ -161,7 +165,17 @@ export type Spawn = {
   background: boolean
   teammate?: boolean
   parentAgentId?: string
-  prompt?: string // 맡긴 일 본문 앞부분 (역할 · 팀 번호를 찾는 데만 씀, 저장하지 않음)
+  prompt?: string // 맡긴 일 본문 앞부분 (역할 · 팀 번호 · 페르소나를 찾는 데만 씀, 저장하지 않음)
+  model?: string // 일하는 모델 (agent.spawn 결과의 model — 엔진이 정한 진짜 모델 id)
+}
+
+
+/** 직급 · 페르소나: roles.json 에 사용자가 정한 게 있으면 그걸, 없으면 모델 이름 · 맡긴 일에서 */
+function roleBadge(s: Spawn): Pick<Worker, 'model' | 'tier' | 'persona'> {
+  const own = roleOf(s.type)
+  const model = own?.model ?? s.model
+  const tier = own?.model ? tierOfModel(own.model) : isPartner(s.type, s.name) ? 'partner' : tierOfModel(s.model)
+  return { model, tier, persona: own?.persona ?? personaOf(`${s.description} ${(s.prompt ?? '').slice(0, 300)}`) }
 }
 
 /** 직원 입사(일 맡김) */
