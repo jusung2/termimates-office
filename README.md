@@ -104,6 +104,19 @@ AI 가 지금 무엇을 하는지 **한눈에** 보이고, 허락이 필요하�
 
 > 💡 처음엔 `/termimates 시연` 으로 가짜 장면부터 구경해 보세요. Claude 를 부르지 않아서 토큰이 하나도 안 들어요.
 
+### 🔄 버전 확인 · 업데이트 · 삭제
+
+| 하고 싶은 것 | Claude Code 안에서 | 터미널에서 |
+|---|---|---|
+| **지금 버전 보기** | `/plugin` → 설치됨 목록에서 `termimates` | `claude plugin list` (`Version:` 줄) |
+| **새 버전 받기** | `/plugin marketplace update termimates`<br>→ `/plugin update termimates@termimates` | `claude plugin marketplace update termimates`<br>→ `claude plugin update termimates@termimates` |
+| **잠깐 끄기** (지우지 않고) | `/plugin disable termimates@termimates` | `claude plugin disable termimates@termimates` |
+| **삭제** | `/plugin uninstall termimates@termimates` | `claude plugin uninstall termimates@termimates` |
+| **마켓플레이스까지 빼기** | `/plugin marketplace remove termimates` | `claude plugin marketplace remove termimates` |
+
+- 업데이트 · 삭제 뒤에는 `/reload-plugins` 또는 Claude Code 를 새로 켜야 반영돼요.
+- 삭제해도 내 컴퓨터에 남은 기록(전기세 · 사무실 상태)은 `~/.termimates` 폴더에 있어요. 깨끗이 지우려면 `rm -rf ~/.termimates`.
+
 ### 명령
 
 | 명령 | 하는 일 |
