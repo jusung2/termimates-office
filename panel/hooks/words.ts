@@ -2,11 +2,12 @@
 
 // 직책: 에이전트 종류 이름을 짧은 한글 역할 하나로 (기획자 · 디자이너 · 개발자 · QA · 리서처).
 // 같은 역할은 한 자리 · 한 직원으로 모인다(직원 = 역할). 이름 낱말로 고르고, 안 맞으면 개발자.
+// 낱말 하나씩 본다: 짧은 낱말(ui · pm · spec · doc …)은 낱말 전체가 같아야 하고(specialist · docker 는 아님), 긴 줄기는 앞부분만 같으면 된다
 const ROLE_WORDS: [RegExp, string][] = [
-  [/^(design|ui|ux|visual|art|image|illustrat|style|brand)/, '디자이너'],
-  [/^(qa|test|verif|review|critic|skeptic|audit|check|judge|lint)/, 'QA'],
-  [/^(plan|architect|analy|brief|spec|pm|product|strateg)/, '기획자'],
-  [/^(explor|research|scout|search|fetch|doc|scientist|reader|guide|web|investig)/, '리서처'],
+  [/^(design|visual|illustrat|brand)|^(ui|ux|art|arts|image|images|style)$/, '디자이너'],
+  [/^(test|verif|review|critic|skeptic|audit|check|judge)|^(qa|lint|linter)$/, 'QA'],
+  [/^(plan|architect|analy|strateg)|^(brief|spec|specs|pm|product)$/, '기획자'],
+  [/^(explor|research|scout|search|fetch|scientist|reader|investig|document)|^(doc|docs|guide|web)$/, '리서처'],
 ]
 
 export function title(role: string | undefined): string {
@@ -32,7 +33,7 @@ export function familyOf(type: string, text = ''): string {
   const bare = type.split(':').pop() ?? type
   if (!GENERIC.test(bare)) {
     const t = title(type)
-    if (t !== '개발자' || /dev|code|engineer|build|exec|impl/i.test(bare)) return t
+    if (t !== '개발자' || /dev|code|engineer|build|exec|impl|debug/i.test(bare)) return t
   }
   for (const [re, name] of TEXT_ROLES) if (re.test(`${bare} ${text}`)) return name
   return '개발자'
@@ -57,10 +58,28 @@ export function jobOf(type: string, text = ''): string {
   const bare = type.split(':').pop() ?? type
   const own = NAMES[type] ?? NAMES[bare]
   if (own) return own
-  if (!type.includes(':') && !BUILTIN.test(bare)) return bare // 내가 만든 에이전트: 이름 그대로
+  // 내가 만든 에이전트: 이름 그대로. 다만 흔한 표준 에이전트 이름과 정확히 같으면(designer · executor 처럼 플러그인이 깔아 둔 것)
+  // 영어 종류 이름 대신 쉬운 역할로 (copywriter · api-builder 처럼 내가 지은 이름은 그대로)
+  const std = roleWord(bare)
+  if (std) return std
+  if (!type.includes(':') && !BUILTIN.test(bare)) return bare
   return familyOf(type, text)
 }
 
+// 흔한 표준 에이전트 이름 (플러그인들이 깔아 두는 것). 이름이 이 중 하나와 정확히 같을 때만 쉬운 역할로 바꾼다.
+// api-builder · my-coder · ui-designer 처럼 사용자가 지은 이름은 역할 낱말이 들어 있어도 그대로 (사용자와 정한 규칙)
+const STANDARD: Record<string, string> = {
+  designer: '디자이너',
+  executor: '개발자', developer: '개발자', engineer: '개발자', coder: '개발자', debugger: '개발자', implementer: '개발자', builder: '개발자',
+  critic: 'QA', reviewer: 'QA', 'code-reviewer': 'QA', 'security-reviewer': 'QA', verifier: 'QA', tester: 'QA', 'qa-tester': 'QA', 'test-engineer': 'QA',
+  planner: '기획자', architect: '기획자', analyst: '기획자',
+  researcher: '리서처', explorer: '리서처', scientist: '리서처', 'document-specialist': '리서처',
+}
+
+/** 이름이 흔한 표준 에이전트 이름과 정확히 같은가 → 그 쉬운 역할 (플러그인 접두사는 떼고 부름) */
+function roleWord(name: string): string | undefined {
+  return STANDARD[name.toLowerCase()]
+}
 
 // -- 직급 · 페르소나 -------------------------------------------------------------------------
 // 직급: 그 직원이 어떤 모델로 일하는지. haiku = 인턴, sonnet = 주니어, opus = 시니어, 바깥 AI(codex · gemini 등) = 협력사.
@@ -348,7 +367,7 @@ export function verdictOf(text: string | undefined): Verdict {
 /** 반려 이유 한 줄: 「이유 · 사유 · because」 줄, 없으면 판정 줄 바로 다음 줄, 없으면 반려 말이 든 줄(그 말만 있으면 안 씀).
  *  못 뽑으면 없음 — 이유 없이 「반려」 만 보여 준다 */
 export function reasonOf(text: string | undefined): string | undefined {
-  const lines = (text ?? '').split('\n').map(l => l.replace(/^[\s#*>\-|•·\d.)]]+/, '').replace(/\*\*/g, '').trim()).filter(Boolean)
+  const lines = (text ?? '').split('\n').map(l => l.replace(/^[\s#*>\-|•·\d.)]+/, '').replace(/\*\*/g, '').trim()).filter(Boolean)
   const why = lines.find(l => /^(?:반려\s*)?(?:이유|사유|원인|reason|because|why)\s*[:：]?/i.test(l) || /때문/.test(l))
   const strip = (l: string) => l
     .replace(/^(?:최종\s*)?(?:판정|결과|결론|verdict|result|decision|status|반려\s*이유|이유|사유|원인|reason|why)\s*[:：]\s*/i, '')

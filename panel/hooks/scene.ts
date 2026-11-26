@@ -2,6 +2,8 @@
 // 한 칸 = 글자 '▀' 하나 = 위 픽셀(글자색) + 아래 픽셀(배경색). 그래서 세로 픽셀은 칸의 2배.
 
 import type { Office, Status, Worker } from '../types'
+import { fold, foldSteps } from './office'
+import type { Spot, UnitInfo } from './office'
 
 export const CW = 12 // 책상 한 자리 가로 칸
 export const CH = 9 // 세로 칸: 말풍선 1 + 그림 7 + 이름표 1
@@ -173,11 +175,39 @@ function colorOf(k: string, role: string): number | undefined {
 export type Seat = {
   key: string; role: string; name: string; col: number; row: number; worker?: Worker; count: number
   team?: boolean; members?: Status[]
+  pick?: string // 누르면 고를 것 (없으면 key). 나란히 앉은 같은 일 직원은 그 자리, 접은 자리는 「fold:리서처」
+  kind?: Spot['kind']
+  ids?: string[] // 이 자리에 든 직원 id 들 (일 맡길 때 서류가 날아갈 자리 찾기)
+  kids?: number // 파트장이면 그 아래 사람 수 (터미널은 층을 안 그리고 「+3」 만)
+  loop?: number // ⟳ 반복 횟수
 }
 
 export type Layout = {
   cols: number; rows: number; seats: Seat[]; shelfX: number
   keyOf: (w: Worker) => string // 그 직원이 앉는 자리 (역할 또는 「QA 1팀」)
+  k: Scale // 그림 배율 (cols · rows · 자리 위치는 1배 기준, 화면 칸은 xOf · yOf 로)
+  xs: number[] // 1배 칸 → 화면 칸 (길이 cols + 1, 마지막 = 화면 폭)
+}
+
+export type Scale = 1 | 1.5 | 2
+
+/** 1배 칸 줄 → 화면 칸 줄 */
+export const yOf = (L: Layout, r: number): number => Math.floor(r * L.k)
+/** 1배 칸 → 화면 칸 */
+export const xOf = (L: Layout, c: number): number => L.xs[Math.max(0, Math.min(L.cols, Math.round(c)))] ?? 0
+/** 화면 크기 (칸 · 줄) */
+export const outOf = (L: Layout): { cols: number; rows: number } => ({ cols: L.xs[L.cols] ?? L.cols, rows: Math.floor(L.rows * L.k) })
+
+// 1.5배: 칸 12개 중 6개를 두 번 그린다. 자리 왼쪽 끝 기준 0 · 2 · 4 · 7 · 9 · 11 번째 — 자리 가운데를 두고 좌우가 같아서
+// 두 눈(4 · 7번째)이 똑같이 두 칸, 머리 · 얼굴 폭도 좌우 대칭 (아무 칸이나 겹치면 한쪽 눈만 커진다)
+const DUP15 = new Set([0, 2, 4, 7, 9, 11])
+function colsMap(cols: number, k: Scale, origin: number): number[] {
+  const xs: number[] = [0]
+  for (let c = 0; c < cols; c++) {
+    const n = k === 2 ? 2 : k === 1.5 && DUP15.has((((c - origin) % CW) + CW) % CW) ? 2 : 1
+    xs.push(xs[c]! + n)
+  }
+  return xs
 }
 
 // 자리 한 칸(CW × CH 칸): 0줄 말풍선 · 1~6줄 사람과 작은 책상 · 7줄 이름표 · 8줄 통로(걸어 다니는 길)
@@ -211,24 +241,99 @@ export function seatsOf(o: Office, keyOf: (w: Worker) => string = w => w.role): 
   return out // 처음 출근한 순서 그대로 (자리 고정)
 }
 
-export function layout(o: Office, width: number, keyOf: (w: Worker) => string, jobOf: (w: Worker) => string = w => w.role): Layout {
-  const cols = Math.max(CW + LEFT, Math.min(512, width))
+export type Opts = { spots?: Spot[]; units?: UnitInfo[]; k?: Scale }
+
+/** 자리 하나에 들어갈 사람 (접은 자리 · +n 자리는 대표 한 명 또는 없음) */
+function seatOfSpot(o: Office, sp: Spot, units: UnitInfo[], jobOf: (w: Worker) => string): Omit<Seat, 'col' | 'row'> {
+  const us = sp.units.map(k => units.find(u => u.key === k)).filter((u): u is UnitInfo => !!u)
+  const list = us.flatMap(u => u.list)
+  const base = { key: sp.key, pick: sp.pick, kind: sp.kind, ids: list.map(w => w.id), name: sp.label }
+  if (sp.kind === 'twin') {
+    const w = o.workers.find(x => x.id === sp.who)
+    // 파트장 「+n」 · ⟳n 은 묶음 첫 자리에만
+    const first = sp.key.endsWith('#1')
+    return { ...base, role: w ? jobOf(w) : sp.family, worker: w, count: 1, ids: w ? [w.id] : [],
+      kids: first ? us[0]?.kids || undefined : undefined, loop: first ? us[0]?.loop || undefined : undefined }
+  }
+  if (sp.kind === 'unit' && us[0]) {
+    const u = us[0]
+    return { ...base, role: jobOf(u.worker), worker: u.worker, count: u.active.length, team: u.team,
+      members: u.team ? u.list.map(w => w.status) : undefined, kids: u.kids || undefined, loop: u.loop || undefined }
+  }
+  // 접은 자리: 지금 일하는 사람을 대표로, 책상 앞 점은 사람마다 (+n 자리는 빈 책상)
+  const best = us.map(u => u.worker).sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status))[0]
+  return { ...base, role: sp.kind === 'more' ? '' : sp.family, worker: sp.kind === 'more' ? undefined : best, count: 0, team: true,
+    members: list.map(w => w.status) }
+}
+
+/** 한 줄에 앉는 자리 수 */
+export const perRowOf = (cols: number): number => Math.max(1, Math.floor((cols - LEFT) / CW))
+const MIN_BIG = 44 // 2배로 그릴 때 1배 기준 최소 폭 (팀장 · 책장 · 문이 다 들어가는 폭)
+
+/** 터미널: 「2배 → 1.5배 → 1배 → 접기 → +n」. width · rows = 그림이 쓸 수 있는 칸 · 줄 수.
+ *  사람이 적어 줄인 폭(width ÷ 배율)으로도 한 줄에 다 앉고 그 배율 높이가 들어가면 크게, 아니면 1배로 줄 수에 맞춰 접는다.
+ *  파트장 아래 직원(boss 있음)은 터미널에선 안 그린다 (파트장 이름표의 「+n」 · 카드로) */
+export function plan(units: UnitInfo[], width: number, rows: number): { k: Scale; spots: Spot[] } {
+  const steps = foldSteps(units.filter(u => !u.boss))
+  const first = steps[0] ?? []
+  for (const k of [2, 1.5] as const) {
+    const vw = Math.floor(width / k)
+    if (vw >= MIN_BIG && first.length <= perRowOf(vw) && Math.floor(k * (STAFF_TOP + CH)) <= rows) return { k, spots: first }
+  }
+  const maxRows = Math.max(1, Math.floor((rows - STAFF_TOP) / CH))
+  return { k: 1, spots: fold(steps, perRowOf(Math.max(CW + LEFT, Math.min(512, width))) * maxRows) }
+}
+
+export function layout(o: Office, width: number, keyOf: (w: Worker) => string, jobOf: (w: Worker) => string = w => w.role,
+  opts: Opts = {}): Layout {
+  const k = opts.k ?? 1
+  const cols = Math.max(CW + LEFT, Math.min(512, Math.floor(width / k)))
   const shelfX = cols - SHELF_W - 2
   // 팀장은 가운데, 책장과 겹치면 왼쪽으로 (보고하러 온 직원이 설 자리도 남긴다)
   const leadCol = Math.max(LEFT, Math.min(Math.floor((cols - CW) / 2), shelfX - CW - 10))
   const seats: Seat[] = [{ key: 'main', role: 'main', name: '팀장', col: leadCol, row: WALL, worker: o.lead, count: 0 }]
-  const staff = seatsOf(o, keyOf)
-  const perRow = Math.max(1, Math.floor((cols - LEFT) / CW))
-  const margin = LEFT + Math.floor((cols - LEFT - perRow * CW) / 2)
+  const staff: Omit<Seat, 'col' | 'row'>[] = opts.spots
+    ? opts.spots.map(sp => seatOfSpot(o, sp, opts.units ?? [], jobOf))
+    : seatsOf(o, keyOf).map(s => {
+      const team = s.list.some(w => w.team)
+      return { key: s.role, role: jobOf(s.worker), name: s.role, worker: s.worker, count: s.count, team,
+        members: team ? s.list.map(w => w.status) : undefined, ids: s.list.map(w => w.id) }
+    })
+  const perRow = perRowOf(cols)
+  // 실제 앉은 자리 수만큼만 가운데에: 사람이 적으면 자리 사이를 조금 띄워 고르게 펼친다 (한 자리 폭의 1.5배까지).
+  // 1.5배는 자리를 팀장 자리와 같은 12칸 무늬에 맞춰야 얼굴이 대칭이라, 간격을 12칸 배수로 · 시작을 무늬에 맞춘다
+  const inRow = Math.max(1, Math.min(perRow, staff.length))
+  const wide = Math.min(Math.floor(CW * 1.5), Math.max(CW, Math.floor((cols - LEFT) / inRow)))
+  const step = k === 1.5 ? CW * Math.max(1, Math.floor(Math.min(CW * 2, (cols - LEFT) / inRow) / CW)) : wide
   staff.forEach((s, i) => {
     const r = Math.floor(i / perRow)
     const c = i % perRow
-    const team = s.list.some(w => w.team)
-    seats.push({ key: s.role, role: jobOf(s.worker), name: s.role, col: margin + c * CW, row: STAFF_TOP + r * CH,
-      worker: s.worker, count: s.count, team, members: team ? s.list.map(w => w.status) : undefined })
+    const n = Math.min(perRow, staff.length - r * perRow) // 이 줄 자리 수
+    const st = n === inRow ? step : CW
+    let margin = LEFT + Math.floor((cols - LEFT - (n - 1) * st - CW) / 2)
+    if (k === 1.5) {
+      const d = (((leadCol - margin) % CW) + CW) % CW
+      margin += d <= CW / 2 && margin + d + (n - 1) * st + CW <= cols ? d : d - CW
+      margin = Math.max(0, margin)
+    }
+    seats.push({ ...s, col: margin + c * st, row: STAFF_TOP + r * CH })
   })
   const staffRows = Math.max(1, Math.ceil(staff.length / perRow))
-  return { cols, rows: STAFF_TOP + staffRows * CH, seats, shelfX, keyOf }
+  return { cols, rows: STAFF_TOP + staffRows * CH, seats, shelfX, keyOf, k, xs: colsMap(cols, k, leadCol) }
+}
+
+/** 크게: 픽셀을 배율만큼 늘린다 (가로는 xs 무늬, 세로는 k 배). 글자는 그리는 쪽에서 xOf · yOf 로 위치만 옮긴다 */
+export function zoom(px: Uint32Array, L: Layout): Uint32Array {
+  if (L.k === 1) return px
+  const w = L.cols, h = L.rows * 2, o = outOf(L), ow = o.cols, oh = o.rows * 2
+  const src = new Int32Array(ow)
+  for (let c = 0; c < w; c++) for (let x = L.xs[c]!; x < L.xs[c + 1]!; x++) src[x] = c
+  const out = new Uint32Array(ow * oh)
+  for (let y = 0; y < oh; y++) {
+    const row = Math.min(h - 1, Math.floor(y / L.k)) * w, dst = y * ow
+    for (let x = 0; x < ow; x++) out[dst + x] = px[row + src[x]!] ?? 0
+  }
+  return out
 }
 
 type Px = { w: number; h: number; px: Uint32Array }
@@ -305,7 +410,7 @@ function seatUnit(b: Px, s: Seat, now: number, frame: number, present: boolean, 
     const kind = reading ? 'read' : kindOf(w.status, w.tool)
     const blink = (Math.floor(now / 250) + (hash(s.key) % 17)) % 17 === 0
     // 생김새(모자 · 소품)는 역할로, 옷 · 머리 색은 자리로 (QA 1팀 · 2팀이 서로 달라 보이게)
-    blitGrid(b, figure(s.role, kind, frame, false, blink), X + 1, Y + 2, s.key)
+    blitGrid(b, figure(s.role, kind, frame, false, blink), X + 1, Y + 2, s.pick ?? s.key)
     if (kind === 'coffee') {
       fill(b, X + 9, Y + 9, 2, 2, C.mug)
       dot(b, X + 10 - (frame % 2), Y + 7 - (frame % 2), C.steam)
@@ -517,6 +622,14 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
   const readers = new Set((o.shelf ?? []).filter(x => now - x.at >= SHELF_MS && now - x.at < SHELF_MS + READ_MS).map(x => x.who))
 
   // 앞뒤 순서: 의자는 맨 뒤, 그다음 발이 위(멀리)에 있는 것부터 그린다 → 앞에 있는 게 뒤에 있는 걸 가린다
+  // 같은 일을 나란히 하는 직원(twin): 청록 깔개 하나 위에 같은 책상 · 같은 옷 (묶음 표시)
+  for (const s of L.seats) {
+    if (s.kind !== 'twin') continue
+    const next = L.seats.find(x => x.kind === 'twin' && x.pick === s.pick && x.row === s.row && x.col > s.col)
+    const end = next ? next.col + 1 : s.col + CW - 1
+    fill(b, s.col + 1, s.row * 2 + 9, end - s.col, 6, 0x2f8f83)
+    fill(b, s.col + 1, s.row * 2 + 10, end - s.col, 4, 0x5fb3a6)
+  }
   for (const s of L.seats) chair(b, s)
   type Thing = { foot: number; paint: () => void }
   const things: Thing[] = [{ foot: 20, paint: () => shelf(b, L.shelfX, taken) }]
@@ -551,7 +664,7 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
     const reading = !!w && readers.has(s.key === 'main' ? 'main' : w.id)
     things.push({ foot: deskBottom(s), paint: () => seatUnit(b, s, now, frame, present, reading, fills[s.key]) })
     const m = moves.get(s.key)
-    if (m) walker(m, s.role, s.key)
+    if (m) walker(m, s.role, s.pick ?? s.key)
   }
   things.push({ foot: aisleFoot(0) + 1, paint: () => door(b) }) // 문은 복도 사람보다 앞
   things.sort((a, c) => a.foot - c.foot)
@@ -562,7 +675,7 @@ export function draw(o: Office, L: Layout, now: number, hour: number, fills: Rec
     const age = now - a.at
     if (age < 0 || age >= ASSIGN_MS) continue
     const w = o.workers.find(x => x.id === a.to)
-    const s = w && L.seats.find(x => x.key === L.keyOf(w))
+    const s = w && (L.seats.find(x => x.ids?.includes(w.id)) ?? L.seats.find(x => x.key === L.keyOf(w)))
     if (!s) continue
     const q = ease(age / ASSIGN_MS)
     const x0 = lead.col + 5, y0 = lead.row * 2 + 9

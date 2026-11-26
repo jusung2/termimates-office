@@ -4,7 +4,10 @@
 import type { Fill, Office, Power, Review, Tok, Worker } from '../types'
 import { plus, sum } from './power'
 import { skillRole } from './skills'
-import { actionText, clip, doneText, familyOf, jobOf, memberOf, teamOf, title } from './words'
+import {
+  actionText, clip, doneText, familyOf, isChecker, isPartner, jobOf, memberOf, personaOf, reasonOf, roleOf, teamOf, tierOfModel, title,
+  verdictOf,
+} from './words'
 
 /** 그 직원의 짧은 한글 역할 */
 export const jobOfW = (w: Worker): string => w.job ?? title(w.role)
@@ -169,7 +172,6 @@ export type Spawn = {
   model?: string // 일하는 모델 (agent.spawn 결과의 model — 엔진이 정한 진짜 모델 id)
 }
 
-
 /** 직급 · 페르소나: roles.json 에 사용자가 정한 게 있으면 그걸, 없으면 모델 이름 · 맡긴 일에서 */
 function roleBadge(s: Spawn): Pick<Worker, 'model' | 'tier' | 'persona'> {
   const own = roleOf(s.type)
@@ -177,7 +179,6 @@ function roleBadge(s: Spawn): Pick<Worker, 'model' | 'tier' | 'persona'> {
   const tier = own?.model ? tierOfModel(own.model) : isPartner(s.type, s.name) ? 'partner' : tierOfModel(s.model)
   return { model, tier, persona: own?.persona ?? personaOf(`${s.description} ${(s.prompt ?? '').slice(0, 300)}`) }
 }
-
 
 /** 검사 직원이 볼 서류를 만든 직원 짐작: 같은 부모(팀장 또는 같은 직원)가 맡긴 일 중, 검사 직원이 아닌 직원이
  *  이 검사 직원이 출근하기 직전에 가장 늦게 끝낸 일. 끝난 일이 없으면 모름 (애매하면 안 짐작) */
@@ -192,7 +193,6 @@ export function guessTarget(o: Office, s: Spawn): string | undefined {
 /** 직원 입사(일 맡김) */
 export function onSpawn(o: Office, s: Spawn, now: number): Office {
   const had = o.workers.find(w => w.id === s.id)
-  const had = o.workers.find(w => w.id === s.id)
   const checker = isChecker(s.type, `${s.description} ${s.name ?? ''}`)
   const w0: Worker = had ?? { ...fresh(s.id, s.type, now), status: 'think', action: '일을 받아 시작하는 중' }
   const text = `${s.description} ${s.name ?? ''} ${(s.prompt ?? '').slice(0, 300)}`
@@ -201,6 +201,9 @@ export function onSpawn(o: Office, s: Spawn, now: number): Office {
     job: jobOf(s.type, text), family: familyOf(s.type, text), team: teamOf(text), member: memberOf(text),
     parent: s.parentAgentId, checker: checker || undefined, reviewOf: checker ? had?.reviewOf ?? guessTarget(o, s) : undefined,
     ...roleBadge(s) }, now, `출근: ${s.description}`)
+  // 층: 다른 직원이 불렀으면 그 직원(의 맨 위 파트장) 자리를 적어 둔다
+  const boss = s.parentAgentId ? o.workers.find(x => x.id === s.parentAgentId && x.id !== s.id) : undefined
+  if (boss) w.part = boss.part ?? unitOf(boss)
   const workers = had ? o.workers.map(x => (x.id === s.id ? w : x)) : [...o.workers, w]
   let lead = o.lead
   if (!s.parentAgentId) {
@@ -209,7 +212,6 @@ export function onSpawn(o: Office, s: Spawn, now: number): Office {
   }
   return { ...o, workers, lead, assigns: [...o.assigns, { at: now, to: s.id }].slice(-30) }
 }
-
 
 /** 검사 결과 한 줄 (사무실 소식 · 보고서 · 카드에 같이 씀) */
 export function reviewLine(r: Pick<Review, 'unit' | 'verdict' | 'reason' | 'nth'>): string {
@@ -268,4 +270,169 @@ export function addUsage(p: Power, id: string, t: Tok, day: string, fill?: Fill)
     lead: id === 'main' && fill ? fill : p.lead,
     workers: id !== 'main' && fill ? { ...p.workers, [id]: fill } : p.workers,
   }
+}
+
+// -- 자리 접기 · 층 · 반복 (웹 · 터미널이 같은 규칙을 쓴다) ------------------------------------------
+// 「같은 규칙, 다른 문턱」: 자리가 모자라면 ① 나란히 펼친 같은 일 직원을 한 자리로 → ② 같은 직군 자리를 「리서처 ×4」 한 자리로
+// (사람 많은 직군부터 하나씩) → ③ 그래도 넘치면 「+n명」 한 자리. 문턱(앉을 수 있는 자리 수)만 웹 · 터미널이 따로 정한다.
+
+/** 한 자리(unitOf) 요약 */
+export type UnitInfo = {
+  key: string; name: string; family: string; worker: Worker; list: Worker[]; active: Worker[]; team: boolean
+  present: Worker[] // 자리에 있는 사람: 일하는 중 + 막 끝나 보고 · 퇴근 걸음 중인 사람 (나란히 자리가 그동안 안 없어지게)
+  desk: boolean // 모두 검사 직원이라 웹에선 심사대에 앉는다 (원래 자리를 따로 안 만든다)
+  boss?: string // 이 자리 직원을 부른 파트장 자리 (팀장이 불렀으면 없음)
+  kids: number // 파트장이면 그 아래에서 일한 사람 수
+  loop: number // ⟳ 반복 횟수 (반려 · 같은 일을 다시 맡김). 없으면 0
+}
+
+/** 화면 한 자리에 그릴 것: 한 자리 · 나란히 앉은 같은 일 한 사람(twin) · 접은 직군(fold) · 「+n명」(more) */
+export type Spot = {
+  key: string // 화면에서 고유한 자리 이름
+  pick: string // 누르면 고를 것 (자리 key · 「fold:리서처」 · 「__more」)
+  kind: 'unit' | 'twin' | 'fold' | 'more'
+  units: string[] // 이 자리에 든 자리(unitOf) 들
+  label: string // 이름표 (unit 은 자리 이름 — 파트 이름은 빼고. ×n 은 그리는 쪽이 붙인다)
+  family: string // 생김새
+  people: number // 이 자리에 든 사람 수
+  who?: string // twin: 그 사람 id
+}
+
+const STATUS_ORDER: Worker['status'][] = ['handoff', 'work', 'think', 'ask', 'wait_report', 'unfinished', 'done', 'idle', 'off', 'desk']
+const TWIN_MAX = 6 // 같은 일 직원을 나란히 펼치는 최대 수 (더 많으면 처음부터 한 자리)
+export const LINGER_MS = 15000 // 끝난 뒤 자리를 지켜 두는 시간 (서류 보고 → 문으로 퇴근 걸음이 끝날 때까지, 웹 · 터미널 다 넉넉히)
+
+/** 웹 심사대에 앉는 검사 직원: 이번 지시의 검사 직원 (office.js reviewersOf 와 같은 규칙) */
+export const atDesk = (o: Office, w: Worker): boolean =>
+  !!w.checker && !w.teammate && (w.ended === undefined || w.started >= (o.promptAt ?? 0) - 1000)
+
+/** 사무실 자리 요약 (처음 출근한 순서). 팀원(teammate)도 자리에 앉는 지금 그림과 같게 모두 넣는다.
+ *  now 를 주면 막 끝난 사람도 퇴근 걸음이 끝날 때까지 자리에 있는 것으로 센다 (present) */
+export function unitsOf(o: Office, now?: number): UnitInfo[] {
+  const byKey = new Map<string, Worker[]>()
+  for (const w of o.workers) byKey.set(unitOf(w), [...(byKey.get(unitOf(w)) ?? []), w])
+  const from = o.promptAt ?? 0
+  const out: UnitInfo[] = []
+  for (const [key, list] of byKey) {
+    const active = list.filter(w => w.ended === undefined)
+    const pool = active.length ? active : list
+    const worker = [...pool].sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status) || b.since - a.since)[0]!
+    // 파트장 아래 자리면 그 파트장 자리 (같은 자리 사람은 다 같은 파트장), 파트장이면 그 아래 사람 수
+    const boss = worker.part
+    const kids = o.workers.filter(w => w.part === key).length
+    const rejects = (o.reviews ?? []).filter(r => r.verdict === 'reject' && r.at >= from && r.unit === key).length
+    // 다시 맡김: 같은 설명의 앞 사람이 끝난 뒤에 또 맡긴 일만 (동시에 여럿 맡긴 병렬은 반복이 아님)
+    const again = list.filter(w => w.started >= from && w.task &&
+      list.some(x => x !== w && x.task === w.task && x.started >= from && x.ended !== undefined && x.ended <= w.started)).length
+    // 나란히 자리 번호: 출근 순으로 앉히되, 이미 끝난 사람 자리가 있으면 새 사람이 그 자리에 이어 앉는다.
+    // 그래서 끝난 사람이 퇴근해 자리가 빠져도 일하던 사람의 자리 번호는 안 바뀐다 (15초 뒤 한 칸씩 순간이동하지 않게)
+    const slots: Worker[] = []
+    for (const w of [...list].sort((a, b) => a.started - b.started)) {
+      const i = slots.findIndex(x => x.ended !== undefined && x.ended <= w.started)
+      if (i >= 0) slots[i] = w
+      else slots.push(w)
+    }
+    const present = now === undefined ? slots.filter(w => w.ended === undefined) : slots.filter(w => w.ended === undefined || now - w.ended < LINGER_MS)
+    out.push({ key, name: nameOf(worker), family: familyOfW(worker), worker, list, active, present, desk: list.every(w => atDesk(o, w)),
+      team: list.some(w => w.team), boss, kids, loop: Math.max(rejects, again) })
+  }
+  return out
+}
+
+/** 웹 사무실 스냅샷의 자리 몫 (register.tsx writeSnap · 시험 · 미리보기가 같이 쓴다).
+ *  steps = 접기 단계 (터미널과 같은 규칙 — 웹은 자기 문턱으로 고르기만). part = 파트장 아래 직원 (파트장 순서대로, 웹은 그 아래 한 줄을 더한다).
+ *  심사대에 앉는 검사 직원 자리는 steps 에 안 넣는다 (심사대 한 곳에만 보이게, 카드는 units 로) */
+export function webSeats(o: Office, now?: number) {
+  const info = unitsOf(o, now)
+  // 심사대에 가 있는 검사 직원은 웹 자리 계산에서 뺀다 (같은 자리에 검사 아닌 직원이 같이 있어도 — 빈 나란히 자리를 차지하지 않게)
+  const off = (w: Worker) => atDesk(o, w)
+  const seat = info.map(u => {
+    const present = u.present.filter(w => !off(w)), active = u.active.filter(w => !off(w))
+    const rep = off(u.worker) ? active[0] ?? u.list.filter(w => !off(w)).pop() ?? u.worker : u.worker
+    return { ...u, present, active, worker: rep }
+  })
+  const units = seat.map(u => ({
+    key: u.key, job: jobOfW(u.worker), family: u.family, worker: u.worker.id, count: u.active.length, team: u.team,
+    members: u.list.map(w => ({ id: w.id, member: w.member, status: w.status })),
+    boss: u.boss, kids: u.kids || undefined, loop: u.loop || undefined,
+  }))
+  const tops = seat.filter(u => !u.boss && !u.desk)
+  const kids = tops.flatMap(t => seat.filter(u => u.boss === t.key && !u.desk))
+  return { units, steps: { main: foldSteps(tops), part: foldSteps(kids) } }
+}
+
+/** 접기 단계들: 0 = 다 펼침, 뒤로 갈수록 덜 자리를 쓴다. 고르는 건 fold() */
+export function foldSteps(units: (Pick<UnitInfo, 'key' | 'family' | 'list' | 'active' | 'team'> & { name?: string; present?: Worker[] })[]): Spot[][] {
+  const people = (u: (typeof units)[number]) => u.active.length || u.list.length
+  const one = (u: (typeof units)[number]): Spot =>
+    ({ key: u.key, pick: u.key, kind: 'unit', units: [u.key], label: u.name ?? u.key, family: u.family, people: people(u) })
+  const steps: Spot[][] = []
+  // 나란히 자리: 일하는 사람 + 막 끝나 퇴근 걸음 중인 사람 (한 명 끝났다고 그 자리가 바로 사라져 뒤 자리가 당겨지지 않게)
+  const here = (u: (typeof units)[number]) => u.present ?? u.active
+  const twins = (u: (typeof units)[number]) => !u.team && here(u).length >= 2 && here(u).length <= TWIN_MAX
+  if (units.some(twins)) {
+    steps.push(units.flatMap(u => (twins(u)
+      ? here(u).map((w, i): Spot => ({ key: `${u.key}#${i + 1}`, pick: u.key, kind: 'twin', units: [u.key], label: `${u.name ?? u.key} ${i + 1}/${here(u).length}`,
+        family: u.family, people: 1, who: w.id }))
+      : [one(u)])))
+  }
+  let cur = units.map(one)
+  steps.push(cur)
+  // 같은 직군 자리가 둘 이상이면 접을 수 있다. 자리 많은 직군부터 (같으면 먼저 온 직군)
+  const fams = [...new Set(cur.map(s => s.family))].filter(f => cur.filter(s => s.family === f).length >= 2)
+  fams.sort((a, b) => cur.filter(s => s.family === b).length - cur.filter(s => s.family === a).length)
+  for (const f of fams) {
+    const mine = cur.filter(s => s.family === f)
+    const n = mine.reduce((acc, s) => acc + s.people, 0)
+    const at = cur.indexOf(mine[0]!)
+    const merged: Spot = { key: `fold:${f}`, pick: `fold:${f}`, kind: 'fold', units: mine.flatMap(s => s.units), label: `${f} ×${n}`, family: f, people: n }
+    cur = [...cur.slice(0, at), merged, ...cur.slice(at).filter(s => s.family !== f)]
+    steps.push(cur)
+  }
+  return steps
+}
+
+/** 앉을 수 있는 자리 수(max)에 맞는 단계. 접어도 넘치면 앞 max-1 자리 + 「+n명」 */
+export function fold(steps: Spot[][], max: number): Spot[] {
+  const m = Math.max(1, Math.floor(max))
+  const fit = steps.find(s => s.length <= m)
+  if (fit) return fit
+  const last = steps[steps.length - 1] ?? []
+  const keep = last.slice(0, m - 1), rest = last.slice(m - 1)
+  const n = rest.reduce((acc, s) => acc + s.people, 0)
+  return [...keep, { key: '__more', pick: '__more', kind: 'more', units: rest.flatMap(s => s.units), label: `+${n}명`, family: '', people: n }]
+}
+
+// -- 화이트보드 칸반 ---------------------------------------------------------------------------
+// 이번 일(사장님 지시 뒤)에 맡긴 일을 단계 칸(대기 · 진행 · 완료 · 반려)에 놓는다. 맡긴 일 낱말에 단계(기획 · 개발 · 검사)가 있거나
+// 검사 결과가 있을 때만 — 단계를 모르면 없음 (화이트보드는 지금 할 일 목록 그대로).
+const STAGE_WORDS: [RegExp, string][] = [
+  [/기획|계획|설계|\bplan|\bspec\b|architect/i, '기획'],
+  [/검사|검토|검수|리뷰|테스트|\bqa\b|\breview|\btest|\bverif/i, '검사'],
+  [/개발|구현|고치|수정|만들|\bimplement|\bbuild|\bfix\b/i, '개발'],
+]
+export const stageWord = (task: string): string | undefined => STAGE_WORDS.find(([re]) => re.test(task))?.[1]
+
+export type BoardCol = { name: '대기' | '진행' | '완료' | '반려'; cards: { text: string; loop?: number }[] }
+
+export function boardOf(o: Office): BoardCol[] | undefined {
+  const from = o.promptAt ?? 0
+  const ws = o.workers.filter(w => w.started >= from && !w.teammate)
+  const rvs = (o.reviews ?? []).filter(r => r.at >= from)
+  if (ws.length < 2 || !(rvs.length || ws.some(w => stageWord(w.task)))) return undefined
+  const cols: BoardCol[] = [{ name: '대기', cards: [] }, { name: '진행', cards: [] }, { name: '완료', cards: [] }, { name: '반려', cards: [] }]
+  const col = (n: BoardCol['name']) => cols.find(c => c.name === n)!
+  for (const t of o.todos ?? []) if (t.state === 'todo') col('대기').cards.push({ text: t.text })
+  for (const w of ws) {
+    const text = clip(`${stageWord(w.task) ? `${stageWord(w.task)}·` : ''}${w.task || unitOf(w)}`, 24)
+    const last = [...rvs].reverse().find(r => r.of === w.id)
+    // 반려 뒤 같은 자리의 이어지는 일이 통과했으면 이 카드는 끝난 이야기 → 반려 칸에서 뺀다
+    const passedLater = last?.verdict === 'reject' && rvs.some(r => r.verdict === 'pass' && r.at > last.at && r.unit === unitOf(w))
+    if (passedLater) continue
+    if (last?.verdict === 'reject') col('반려').cards.push({ text, loop: last.nth })
+    else if (w.status === 'unfinished') col('반려').cards.push({ text: `${text} (못 끝냄)` })
+    else if (w.ended !== undefined) col('완료').cards.push({ text })
+    else col('진행').cards.push({ text })
+  }
+  return cols
 }

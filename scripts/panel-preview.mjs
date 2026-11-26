@@ -1,32 +1,32 @@
-// 미리보기: 실제 scene.ts 의 draw() 로 그린 픽셀을 PNG 로 (칸 하나 = 가로 1 · 세로 2 픽셀, 4배 확대)
+// 미리보기: 실제 scene.ts 의 plan() → layout() → draw() → zoom() 길 그대로 그린 픽셀을 PNG 로 (칸 하나 = 가로 1 · 세로 2 픽셀, 4배 확대)
+// 쓰는 법: node scripts/panel-preview.mjs <출력.png> [칸=113] [그림 줄 수=40]   (최종 확인은 진짜 터미널로)
 import { writeFileSync } from 'node:fs'
+import { register } from 'node:module'
 import { deflateSync } from 'node:zlib'
-// 쓰는 법: node scripts/panel-preview.mjs <복사한 scene.ts> <출력.png>  (node 가 .ts 를 바로 읽음. 최종 확인은 진짜 터미널로)
-const scene = await import(process.argv[2])
-const out = process.argv[3]
+// 패널 .ts 를 바로 읽는다 (node 22 는 타입을 지우고 돌림). 확장자 없는 import('./office') 만 './office.ts' 로 찾아 준다
+register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s, c, next) {
+  try { return await next(s, c) } catch (e) { if (s.startsWith('.') && !/\\.[cm]?[jt]sx?$/.test(s)) return next(s + '.ts', c); throw e } }`))
+const scene = await import(new URL('../panel/hooks/scene.ts', import.meta.url).href)
+const office = await import(new URL('../panel/hooks/office.ts', import.meta.url).href)
+const [out = 'panel-preview.png', width = '113', rows = '40'] = process.argv.slice(2)
 const now = 1_800_000_000_000
-const W = (id, role, extra = {}) => ({ id, role, task: '일', status: 'work', tool: 'Edit', target: 'a.ts', action: '', since: now - 3000, started: now - 60000, background: false, recent: [], ...extra })
-const Q = (team, n, extra = {}) => W(`q${team}${n}`, 'general-purpose', { job: 'QA', team: String(team), member: `${team}-${n}`, ...extra })
-// 예시: QA 3팀 × 3명 (팀마다 앞 팀원은 끝, 지금 한 명 일함) + 디자이너 한 명
-const o = {
-  lead: { ...W('main', 'main'), status: 'wait_report', tool: undefined },
-  workers: [
-    Q(1, 1, { status: 'done', ended: now - 60000 }), Q(1, 2, { tool: 'Bash' }),
-    Q(2, 1, { status: 'done', ended: now - 60000 }), Q(2, 2, { status: 'done', ended: now - 1700 }), Q(2, 3, { started: now - 1200, status: 'think', tool: undefined }),
-    Q(3, 1, { tool: 'Read' }),
-    W('d1', 'designer', { job: '디자이너', tool: 'Skill', target: 'ui-design' }),
-  ],
-  handoffs: [{ at: now - 1700, from: 'q22', preview: 'x' }],
-  assigns: [], skillUses: {},
-  shelf: [{ at: now - 2600, who: 'd1', book: 'ui-design' }],
-}
-const keyOf = w => (w.team ? `${w.job} ${w.team}팀` : (w.job ?? w.role))
-const jobOf = w => w.job ?? w.role
+// 예시: QA 3팀 (앞 팀원은 끝) + 리서처 둘 나란히 + 디자이너 + 개발 파트장과 그 아래 둘
+let o = office.onPrompt(office.EMPTY, '회원가입 만들어줘', now - 90000)
+const sp = (id, type, description, x = {}) => { o = office.onSpawn(o, { id, type, description, background: true, ...x }, now - 80000 + o.workers.length * 100) }
+const work = (id, tool = 'Edit') => { o = office.onToolStart(o, id, tool, 'a.ts', undefined, now - 3000) }
+for (const t of [1, 2, 3]) { sp(`q${t}1`, 'general-purpose', `QA ${t}팀 ${t}-1`); o = office.onComplete(o, `q${t}1`, '찾음', false, now - 60000); sp(`q${t}2`, 'general-purpose', `QA ${t}팀 ${t}-2`); work(`q${t}2`, 'Bash') }
+sp('x1', 'Explore', '조사 1'); sp('x2', 'Explore', '조사 2'); work('x1', 'Grep'); work('x2', 'Read')
+sp('d1', 'designer', '시안'); work('d1')
+sp('L1', 'executor', '개발 이끌기'); sp('k1', 'executor', '조각 1', { parentAgentId: 'L1' }); sp('k2', 'executor', '조각 2', { parentAgentId: 'L1' })
+for (const id of ['L1', 'k1', 'k2']) work(id)
 const frames = []
-for (const [cols, dt] of [[64, 0], [64, 700], [64, 1400], [48, 0]]) {
-  const L = scene.layout(o, cols, keyOf, jobOf)
-  const px = scene.draw(o, L, now + dt, 14)
-  frames.push({ L, px })
+for (const [cols, budget, dt] of [[+width, +rows, 0], [+width, +rows, 700], [Math.floor(+width / 2), +rows, 0], [+width, 70, 0]]) {
+  const units = office.unitsOf(o, now + dt)
+  const p = scene.plan(units, cols, budget)
+  const L = scene.layout(o, cols, office.unitOf, office.familyOfW, { spots: p.spots, units, k: p.k })
+  const size = scene.outOf(L)
+  frames.push({ L: { cols: size.cols, rows: size.rows }, px: scene.zoom(scene.draw(o, L, now + dt, 14), L) })
+  console.log(`${cols}칸 · 그림 몫 ${budget}줄 → 배율 ${p.k} · ${size.cols}×${size.rows} · 자리 ${p.spots.map((x) => x.label).join(', ')}`)
 }
 const S = 4, gap = 8
 const Wd = Math.max(...frames.map(f => f.L.cols)) * S
