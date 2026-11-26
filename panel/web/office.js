@@ -23,6 +23,7 @@
 
   // ---- 상태 ----
   let bossAt = null; // 사장님이 지금 어디 있는지 (말풍선용)
+  const boxes = { bubbles: [], tags: [] }; // 지난 장면의 말풍선 · 묶음 글 자리 (기기 픽셀, 겹침 시험용)
   let snap = null, sel = null, L = null, sd = 2, dpr = 1, lastBgKey = '', hits = [], hover = null;
   const qs = new URLSearchParams(location.search);
   const session = qs.get('session') || 'auto';
@@ -110,7 +111,9 @@
     const us = sp.units.map((k) => units.find((u) => u.key === k)).filter(Boolean);
     const wOf = (id) => (o.workers || []).find((x) => x.id === id);
     const members = us.flatMap((u) => u.members);
-    const base = { key: sp.key, pick: sp.pick, kind: sp.kind, units: sp.units, name: sp.label, members, team: false, count: 0, boss: us[0] && us[0].boss };
+    // leaving: 이 자리에서 나가는 중인 앞사람 (새 사람이 자리를 이어받아도 문까지 끝까지 걷는다 — 패널 office.ts unitsOf)
+    const leaving = (sp.leaving || []).map(wOf).filter(Boolean);
+    const base = { key: sp.key, pick: sp.pick, kind: sp.kind, units: sp.units, name: sp.label, members, team: false, count: 0, boss: us[0] && us[0].boss, leaving };
     if (sp.kind === 'twin') {
       const w = wOf(sp.who);
       const first = /#1$/.test(sp.key); // 파트장 표시 · ⟳n 은 묶음 첫 자리에만
@@ -506,8 +509,8 @@
     const z = pts[pts.length - 1], y = pts[pts.length - 2] || z;
     return { x: z.x, y: z.y, dx: z.x - y.x, dy: z.y - y.y };
   }
-  function motionOf(o, s, now) {
-    const w = s.worker;
+  function motionOf(o, s, now, who) {
+    const w = who || s.worker; // who: 자리에서 나가는 앞사람 (보고 · 퇴근 걸음만)
     if (!w) return {};
     const id = s.lead ? 'main' : w.id;
     const h = s.lead ? null : [...(o.handoffs || [])].reverse().find((x) => x.from === w.id);
@@ -530,6 +533,7 @@
       if (lAge >= leaveMs) return { gone: true };
       if (lAge >= 0) return { m: { pts: leavePts, p: ease(lAge / leaveMs) } };
     }
+    if (who) return {}; // 나가는 앞사람: 책장 · 출근 걸음은 자리 주인 몫
     // 책장: 스킬을 쓰면 갔다 옴
     const sh = [...(o.shelf || [])].reverse().find((x) => x.who === id);
     const sAge = sh ? now - sh.at : -1;
@@ -766,9 +770,17 @@
       const t = bAge / BOSS_MS, pts = bossPath();
       boss = t < 0.4 ? { pts, p: ease(t / 0.4), carry: 'doc' } : t < 0.58 ? { pts, p: 1, give: ease((t - 0.4) / 0.18) } : { pts, p: 1 - ease((t - 0.58) / 0.42) };
     }
+    // 자리를 이어받힌 앞사람: 새 사람이 앉아도 보고 → 문으로 끝까지 걸어 나간다 (퇴근 전 잠깐은 자리 옆에 선 채로)
+    const ghosts = [];
+    for (const s of L.seats) for (const lw of s.leaving || []) {
+      if (lw.ended == null) continue;
+      const r = motionOf(o, s, now, lw);
+      if (!r.gone) ghosts.push({ s, m: r.m || { pts: toDoor(s), p: 0 } });
+    }
     // 문은 누가 드나들 때만 열린다
     let doorOpen = false;
     const nearDoor = (m) => { const p = at(m.pts, m.p * lenOf(m.pts)); return p.x < L.doorCx + 40 && p.y < L.doorFoot + 34; };
+    for (const g of ghosts) if (nearDoor(g.m)) doorOpen = true;
     for (const m of moves.values()) if (nearDoor(m)) doorOpen = true;
     for (const x of RV.walk) if (nearDoor(x.m)) doorOpen = true;
     if (boss && nearDoor(boss)) doorOpen = true;
@@ -817,6 +829,7 @@
       } });
       const m = moves.get(s.key);
       if (m) walker(m, lookOf(s.job), exprOf(pctOf(fillOf(s)), null, now));
+      for (const g of ghosts) if (g.s === s) walker(g.m, lookOf(s.job), 'happy');
     }
     // 심사대: 카운터 · 앉은 검사 직원 · 줄 선 직원 · 오가는 사람
     if (L.desk) {
@@ -955,6 +968,7 @@
     const rows = new Map();
     for (const s of L.seats) rows.set(s.sy, (rows.get(s.sy) || []).concat([s]));
     const qfs = Math.round(fs * 0.74);
+    boxes.bubbles = []; boxes.tags = []; // 말풍선이 차지한 곳 (그림자 · 꼬리까지, 기기 픽셀): 묶음 글이 피해 간다
     for (const row of rows.values()) {
       row.sort((a, b) => a.cx - b.cx);
       const off = (s) => gone.has(s.key) || moves.has(s.key) || (!s.lead && !!s.worker && RV.hide.has(s.worker.id)); // 심사대에 가 있으면 자리 말풍선 없음
@@ -996,6 +1010,7 @@
           ctx.fillStyle = red; roundRect(ctx, px, py, ppw, pph, pph / 2.4); ctx.fill();
           const tx = clamp(X(s.cx), px + pph / 2, px + ppw - pph / 2);
           ctx.beginPath(); ctx.moveTo(tx - 3 * dpr, py + pph - dpr); ctx.lineTo(tx, py + pph + 5 * dpr); ctx.lineTo(tx + 3 * dpr, py + pph - dpr); ctx.fill();
+          boxes.bubbles.push({ x: px, y: py, w: ppw + dpr, h: pph + 2 * dpr }, { x: tx - 3 * dpr, y: py + pph, w: 6 * dpr, h: 5 * dpr });
           ctx.font = `700 ${qfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
           ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.fillText(ptext, px + ppw / 2, py + pph / 2 + dpr * 0.5);
         }
@@ -1011,6 +1026,8 @@
         const tx = clamp(X(s.cx), bx + ph / 2, bx + pw - ph / 2);
         ctx.fillStyle = '#fffdf8'; ctx.beginPath(); ctx.moveTo(tx - 4 * dpr, by + ph - dpr); ctx.lineTo(tx, by + ph + 6 * dpr); ctx.lineTo(tx + 4 * dpr, by + ph - dpr); ctx.fill();
         ctx.strokeStyle = accent; ctx.beginPath(); ctx.moveTo(tx - 4 * dpr, by + ph); ctx.lineTo(tx, by + ph + 6 * dpr); ctx.lineTo(tx + 4 * dpr, by + ph); ctx.stroke();
+        // 테두리 굵기(1.5) 반 · 그림자(아래 2) · 꼬리(아래 6)까지 말풍선 몫
+        boxes.bubbles.push({ x: bx - dpr, y: by - dpr, w: pw + 2 * dpr, h: ph + 3 * dpr }, { x: tx - 5 * dpr, y: by + ph, w: 10 * dpr, h: 7 * dpr });
         ctx.fillStyle = '#2b2420'; ctx.textAlign = 'center'; ctx.fillText(text, bx + pw / 2, by + ph / 2 + dpr * 0.5);
       });
     }
@@ -1018,9 +1035,13 @@
     // 묶음 글: 나란히 앉은 같은 일 「같은 일 ×4」 · 파트 줄 「▸ 개발자 파트 · 3명」 (밝은 글 + 진한 바탕 — 바닥 위에서도 읽히게)
     const gfs = Math.round(fs * 0.72);
     ctx.textAlign = 'left';
-    const tag = (text, x, y, bgc, fg) => {
+    const tag = (text, x, y, bgc, fg, dodge) => {
       ctx.font = `700 ${gfs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
       const w = ctx.measureText(text).width + gfs * 0.8, h = gfs * 1.45;
+      // 말풍선(모서리 · 그림자 · 꼬리)과 겹치면 그 아래로 비켜 쓴다 (테두리 반 + 1픽셀 띄움)
+      const hit = (b, yy) => x - dpr < b.x + b.w && b.x < x + w + dpr && yy - h / 2 - dpr < b.y + b.h && b.y < yy + h / 2 + dpr;
+      for (let k = 0; dodge && k < 4; k++) { const b = boxes.bubbles.find((bb) => hit(bb, y)); if (!b) break; y = b.y + b.h + h / 2 + 2 * dpr; }
+      boxes.tags.push({ x: x - dpr / 2, y: y - h / 2 - dpr / 2, w: w + dpr, h: h + dpr, text });
       ctx.fillStyle = bgc; roundRect(ctx, x, y - h / 2, w, h, h / 2); ctx.fill();
       ctx.strokeStyle = fg; ctx.lineWidth = dpr; ctx.stroke();
       ctx.fillStyle = fg; ctx.fillText(text, x + gfs * 0.4, y + dpr * 0.5);
@@ -1029,7 +1050,7 @@
     for (const g of twinGroups()) {
       if (tagged.has(g.k)) continue; // 줄이 바뀐 묶음은 첫 줄에만
       tagged.add(g.k);
-      tag(`같은 일 ×${L.seats.filter((x) => x.kind === 'twin' && x.pick === g.k).length}`, X(g.x0 + 4), Y(g.sy + 28), '#0b5c52', '#ffffff');
+      tag(`같은 일 ×${L.seats.filter((x) => x.kind === 'twin' && x.pick === g.k).length}`, X(g.x0 + 4), Y(g.sy + 28), '#0b5c52', '#ffffff', true);
     }
     for (const g of partGroups()) {
       const n = g.seats.reduce((a, x) => a + (x.members ? x.members.length : 1), 0);
@@ -1588,5 +1609,5 @@
   requestAnimationFrame(loop);
 
   // 시험용: 화면 없이 배치만 확인
-  window.__termimates = { layout: (W, Hmax) => layout(W, Hmax), take, motionOf: (s, now) => motionOf(snap.office, s, now), world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
+  window.__termimates = { layout: (W, Hmax) => layout(W, Hmax), take, motionOf: (s, now, who) => motionOf(snap.office, s, now, who), boxes: () => boxes, world: () => world, select: (k) => { sel = k; card(); return $('cardBody').innerHTML; }, news: (open) => { sel = open ? '__news' : null; newsDrop = open; lastNews = ''; card(); news(); return open ? $('cardBody').innerHTML : $('newsList').innerHTML; } };
 })();

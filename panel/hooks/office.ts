@@ -284,6 +284,8 @@ export type UnitInfo = {
   boss?: string // 이 자리 직원을 부른 파트장 자리 (팀장이 불렀으면 없음)
   kids: number // 파트장이면 그 아래에서 일한 사람 수
   loop: number // ⟳ 반복 횟수 (반려 · 같은 일을 다시 맡김). 없으면 0
+  leaving: Worker[] // 막 끝나 나가는 중인데 이 자리 대표가 아닌 사람 (새 사람이 자리를 이어받음 등). 자리 그림과 따로 끝까지 걸어 나간다
+  before: Record<string, Worker[]> // 나란히 자리 이어받기: 지금 그 자리 사람 id → 그 자리에서 막 나가는 중인 앞사람들
 }
 
 /** 화면 한 자리에 그릴 것: 한 자리 · 나란히 앉은 같은 일 한 사람(twin) · 접은 직군(fold) · 「+n명」(more) */
@@ -296,6 +298,7 @@ export type Spot = {
   family: string // 생김새
   people: number // 이 자리에 든 사람 수
   who?: string // twin: 그 사람 id
+  leaving?: string[] // 이 자리에서 나가는 중인 사람 id (자리를 이어받은 새 사람과 따로 문까지 걸어 나간다)
 }
 
 const STATUS_ORDER: Worker['status'][] = ['handoff', 'work', 'think', 'ask', 'wait_report', 'unfinished', 'done', 'idle', 'off', 'desk']
@@ -326,15 +329,22 @@ export function unitsOf(o: Office, now?: number): UnitInfo[] {
       list.some(x => x !== w && x.task === w.task && x.started >= from && x.ended !== undefined && x.ended <= w.started)).length
     // 나란히 자리 번호: 출근 순으로 앉히되, 이미 끝난 사람 자리가 있으면 새 사람이 그 자리에 이어 앉는다.
     // 그래서 끝난 사람이 퇴근해 자리가 빠져도 일하던 사람의 자리 번호는 안 바뀐다 (15초 뒤 한 칸씩 순간이동하지 않게)
+    // 이어받은 자리의 앞사람은 before 에 적어 둔다: 새 사람이 앉아도 앞사람은 퇴근 걸음을 끝까지 걷는다 (갑자기 사라지지 않게)
     const slots: Worker[] = []
+    const prev = new Map<string, Worker[]>()
     for (const w of [...list].sort((a, b) => a.started - b.started)) {
       const i = slots.findIndex(x => x.ended !== undefined && x.ended <= w.started)
-      if (i >= 0) slots[i] = w
-      else slots.push(w)
+      if (i >= 0) {
+        prev.set(w.id, [slots[i]!, ...(prev.get(slots[i]!.id) ?? [])])
+        slots[i] = w
+      } else slots.push(w)
     }
-    const present = now === undefined ? slots.filter(w => w.ended === undefined) : slots.filter(w => w.ended === undefined || now - w.ended < LINGER_MS)
+    const fresh = (w: Worker) => now !== undefined && w.ended !== undefined && now - w.ended < LINGER_MS
+    const present = now === undefined ? slots.filter(w => w.ended === undefined) : slots.filter(w => w.ended === undefined || fresh(w))
+    const before: Record<string, Worker[]> = {}
+    for (const [id, ws] of prev) if (ws.some(fresh)) before[id] = ws.filter(fresh)
     out.push({ key, name: nameOf(worker), family: familyOfW(worker), worker, list, active, present, desk: list.every(w => atDesk(o, w)),
-      team: list.some(w => w.team), boss, kids, loop: Math.max(rejects, again) })
+      team: list.some(w => w.team), boss, kids, loop: Math.max(rejects, again), leaving: list.filter(w => w !== worker && fresh(w)), before })
   }
   return out
 }
@@ -349,7 +359,9 @@ export function webSeats(o: Office, now?: number) {
   const seat = info.map(u => {
     const present = u.present.filter(w => !off(w)), active = u.active.filter(w => !off(w))
     const rep = off(u.worker) ? active[0] ?? u.list.filter(w => !off(w)).pop() ?? u.worker : u.worker
-    return { ...u, present, active, worker: rep }
+    // 심사대 직원은 심사대 장면이 퇴근까지 따로 그린다
+    const before = Object.fromEntries(Object.entries(u.before).map(([k, ws]) => [k, ws.filter(w => !off(w))]))
+    return { ...u, present, active, worker: rep, leaving: u.leaving.filter(w => !off(w) && w !== rep), before }
   })
   const units = seat.map(u => ({
     key: u.key, job: jobOfW(u.worker), family: u.family, worker: u.worker.id, count: u.active.length, team: u.team,
@@ -362,10 +374,12 @@ export function webSeats(o: Office, now?: number) {
 }
 
 /** 접기 단계들: 0 = 다 펼침, 뒤로 갈수록 덜 자리를 쓴다. 고르는 건 fold() */
-export function foldSteps(units: (Pick<UnitInfo, 'key' | 'family' | 'list' | 'active' | 'team'> & { name?: string; present?: Worker[] })[]): Spot[][] {
+export function foldSteps(units: (Pick<UnitInfo, 'key' | 'family' | 'list' | 'active' | 'team'> &
+  { name?: string; present?: Worker[]; leaving?: Worker[]; before?: Record<string, Worker[]> })[]): Spot[][] {
   const people = (u: (typeof units)[number]) => u.active.length || u.list.length
+  const ids = (ws: Worker[] | undefined) => (ws?.length ? { leaving: ws.map(w => w.id) } : {})
   const one = (u: (typeof units)[number]): Spot =>
-    ({ key: u.key, pick: u.key, kind: 'unit', units: [u.key], label: u.name ?? u.key, family: u.family, people: people(u) })
+    ({ key: u.key, pick: u.key, kind: 'unit', units: [u.key], label: u.name ?? u.key, family: u.family, people: people(u), ...ids(u.leaving) })
   const steps: Spot[][] = []
   // 나란히 자리: 일하는 사람 + 막 끝나 퇴근 걸음 중인 사람 (한 명 끝났다고 그 자리가 바로 사라져 뒤 자리가 당겨지지 않게)
   const here = (u: (typeof units)[number]) => u.present ?? u.active
@@ -373,7 +387,7 @@ export function foldSteps(units: (Pick<UnitInfo, 'key' | 'family' | 'list' | 'ac
   if (units.some(twins)) {
     steps.push(units.flatMap(u => (twins(u)
       ? here(u).map((w, i): Spot => ({ key: `${u.key}#${i + 1}`, pick: u.key, kind: 'twin', units: [u.key], label: `${u.name ?? u.key} ${i + 1}/${here(u).length}`,
-        family: u.family, people: 1, who: w.id }))
+        family: u.family, people: 1, who: w.id, ...ids(u.before?.[w.id]) }))
       : [one(u)])))
   }
   let cur = units.map(one)
@@ -385,7 +399,9 @@ export function foldSteps(units: (Pick<UnitInfo, 'key' | 'family' | 'list' | 'ac
     const mine = cur.filter(s => s.family === f)
     const n = mine.reduce((acc, s) => acc + s.people, 0)
     const at = cur.indexOf(mine[0]!)
-    const merged: Spot = { key: `fold:${f}`, pick: `fold:${f}`, kind: 'fold', units: mine.flatMap(s => s.units), label: `${f} ×${n}`, family: f, people: n }
+    const gone = mine.flatMap(s => s.leaving ?? [])
+    const merged: Spot = { key: `fold:${f}`, pick: `fold:${f}`, kind: 'fold', units: mine.flatMap(s => s.units), label: `${f} ×${n}`, family: f, people: n,
+      ...(gone.length ? { leaving: gone } : {}) }
     cur = [...cur.slice(0, at), merged, ...cur.slice(at).filter(s => s.family !== f)]
     steps.push(cur)
   }
